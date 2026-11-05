@@ -18,7 +18,11 @@ import riads_leads as core
 import store
 
 app = Flask(__name__)
-KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+KEYS = [k.strip() for name in ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_API_KEY_2", "GOOGLE_MAPS_API_KEYS")
+        for k in os.environ.get(name, "").split(",") if k.strip()]
+KEYS = list(dict.fromkeys(KEYS))  # بدون تكرار
+KEY = KEYS[0] if KEYS else ""
+EXHAUSTED = {}  # مفتاح -> وقت العودة (بعد خطأ الحصة)
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
 TOKEN = hmac.new(("riads|" + ACCESS_CODE + "|" + KEY).encode(), b"ok", hashlib.sha256).hexdigest()
 
@@ -69,21 +73,34 @@ def public_url(u):
 
 @app.get("/api/plan")
 def plan():
-    return jsonify(queries=len(core.QUERIES), cells=len(CELLS), configured=bool(KEY))
+    return jsonify(queries=len(core.QUERIES), cells=len(CELLS), configured=bool(KEYS), keys=len(KEYS))
 
 
 @app.post("/api/search")
 def search():
-    """طلب واحد قصير: استعلام واحد في خلية واحدة (يناسب حدود Vercel)."""
-    if not KEY:
+    """طلب واحد قصير: استعلام واحد في خلية واحدة. يوزّع الحمل على المفاتيح ويتحول لآخر عند انتهاء حصة أحدها."""
+    if not KEYS:
         return jsonify(error="GOOGLE_MAPS_API_KEY غير مضبوط على الخادم"), 500
     d = request.get_json(force=True)
     try:
         q, c = core.QUERIES[int(d["q"])], CELLS[int(d["cell"])]
-        leads = [l for l in map(core.place_to_lead, core.search_cell(KEY, q, c)) if l]
-        return jsonify(leads=leads)
     except Exception as e:  # noqa: BLE001
-        return jsonify(error=str(e)), (429 if "Google API 429" in str(e) else 502)
+        return jsonify(error=str(e)), 400
+    now, start = time.time(), (int(d["q"]) + int(d["cell"])) % len(KEYS)
+    order = [KEYS[(start + i) % len(KEYS)] for i in range(len(KEYS))]
+    order = [k for k in order if EXHAUSTED.get(k, 0) < now] or order  # الأحياء أولاً
+    last = None
+    for key in order:
+        try:
+            leads = [l for l in map(core.place_to_lead, core.search_cell(key, q, c)) if l]
+            return jsonify(leads=leads)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if "Google API 429" in str(e):
+                EXHAUSTED[key] = now + 600  # استرح 10 دقائق
+                continue
+            break
+    return jsonify(error=str(last)), (429 if "Google API 429" in str(last) else 502)
 
 
 @app.post("/api/enrich")
