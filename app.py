@@ -271,7 +271,9 @@ async function loadStored(){
 }
 loadStored();
 $('go').onclick=async()=>{
-  $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('csv').disabled=true;const NEW=[];
+  $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('csv').disabled=true;const buf=[];let addedTotal=0,flushing=Promise.resolve();const addedSrc=new Set();
+  const flush=(force)=>{if(!buf.length||(!force&&buf.length<15))return;const chunk=buf.splice(0);
+    flushing=flushing.then(async()=>{try{const s=await post('/api/save',{rows:chunk});addedTotal+=s.added;s.added_sources.forEach(x=>addedSrc.add(x))}catch(e){buf.unshift(...chunk)}})};
   const KNOWN=new Set();STORED.forEach(r=>srcs(r).forEach(s=>KNOWN.add(s)));
   const t0=Date.now(),tick=setInterval(()=>{$('time').textContent=Math.min(120,Math.round((Date.now()-t0)/1000))+' / 120 ث'},500);
   try{
@@ -286,15 +288,17 @@ $('go').onclick=async()=>{
     if(done&&failed===done&&!quota)throw new Error(lastErr);
     const leads=[...found.values()].filter(l=>!KNOWN.has(l.source)),doCrawl=$('crawl').checked,seen=new Set();let n=0;
     const already=found.size-leads.length;
+    leads.forEach(l=>buf.push(plain(l)));flush(true); // احفظ نتائج Google فوراً قبل زيارة المواقع
     if(doCrawl)await pool(leads,12,async l=>{
-      try{NEW.push((await post('/api/enrich',l)).row);seen.add(l.source)}catch(e){}
+      try{buf.push((await post('/api/enrich',l)).row);seen.add(l.source);flush(false)}catch(e){}
       n++;$('msg').textContent=`رياضات جديدة: استخراج الإيميل والواتساب ${n}/${leads.length}`;
     },t0+LIMIT);
-    leads.filter(l=>!seen.has(l.source)).forEach(l=>NEW.push(plain(l))); // ما لم يلحق الوقت بزيارته
     const left=leads.length-seen.size;
     $('msg').textContent='جاري الحفظ...';
-    const saved=await post('/api/save',{rows:NEW});
-    ROWS=STORED=saved.rows;FRESH=new Set(saved.added_sources);
+    flush(true);await flushing;if(buf.length){flush(true);await flushing}
+    if(buf.length)throw new Error('تعذّر حفظ '+buf.length+' رياض. لا تغلق الصفحة وأعد المحاولة.');
+    const all=await (await fetch('/api/leads')).json();
+    ROWS=STORED=all.rows||[];FRESH=new Set(addedSrc);const saved={added:addedTotal};
     $('msg').textContent=(stopFlag?'تم الإيقاف':'انتهى')+`: أُضيف ${saved.added} رياض جديد، المجموع المحفوظ ${ROWS.length}`+(already?` (تخطّيت ${already} موجودة سابقاً)`:'')+(doCrawl&&left?` — ${left} لم يُفحص موقعها بسبب حد الوقت`:'');
     if(quota)$('err').textContent='توقف البحث: تجاوز مشروع Google حصته اليومية (SearchTextRequest per day). ارفع الحصة من Google Cloud ← APIs & Services ← Places API (New) ← Quotas، أو أعد المحاولة غداً. ما وُجد قبل التوقف تم حفظه.';
     else if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;
