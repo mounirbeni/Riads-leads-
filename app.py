@@ -215,7 +215,7 @@ input{width:100%;padding:12px;margin:12px 0;border:1px solid var(--line);border-
 button{width:100%;background:var(--pri);color:#fff;border:0;border-radius:8px;padding:12px;font-size:16px;cursor:pointer}
 #e{color:#c0392b;min-height:20px;margin-top:8px}
 </style></head><body>
-<form id="f"><h2>🏯 Riads Leads</h2><div>أدخل كود الدخول</div>
+<form id="f"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#b4532a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V12a8 8 0 0 1 16 0v9"/><path d="M9 21v-5a3 3 0 0 1 6 0v5"/><path d="M12 2v1.5"/></svg><h2 style="margin:8px 0 4px">Riads Leads</h2><div>أدخل كود الدخول</div>
 <input id="c" type="password" autocomplete="current-password" autofocus><button>دخول</button><div id="e"></div></form>
 <script>
 document.getElementById('f').onsubmit=async e=>{e.preventDefault();
@@ -238,6 +238,9 @@ PAGE = r"""<!doctype html>
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="icon" type="image/png" href="/icon-192.png">
 <style>
+.i{width:1.15em;height:1.15em;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:-.2em}
+.i.f{fill:currentColor;stroke:none}
+.logo{width:26px;height:26px;stroke-width:1.8;vertical-align:-6px;margin-inline-start:6px}
 :root{--bg:#f6f0e8;--card:#fff;--ink:#2b2118;--mut:#85766a;--pri:#b4532a;--pri2:#c4623a;--ok:#1f9d55;--line:#eadfce;--chip:#efe6da;--sat:env(safe-area-inset-top);--sab:env(safe-area-inset-bottom)}
 @media(prefers-color-scheme:dark){:root{--bg:#161210;--card:#231d18;--ink:#f3e9dc;--mut:#a8998b;--line:#352c24;--chip:#2e251e}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -248,7 +251,7 @@ input,button{font:inherit}
 .top{padding:calc(var(--sat) + 10px) 16px 12px;background:linear-gradient(160deg,var(--pri2),var(--pri));color:#fff;border-radius:0 0 22px 22px;box-shadow:0 4px 16px rgba(120,50,20,.25);flex:none}
 .top .row1{display:flex;align-items:center;justify-content:space-between}
 .top h1{margin:0;font-size:22px;font-weight:700;letter-spacing:.2px}.top h1 small{font-weight:400;opacity:.85;font-size:14px;margin-inline-start:6px}
-.icon-btn{background:rgba(255,255,255,.18);border:0;color:#fff;width:40px;height:40px;border-radius:50%;font-size:20px;display:grid;place-items:center}
+.icon-btn{background:rgba(255,255,255,.18);border:0;color:#fff;width:40px;height:40px;border-radius:50%;font-size:20px;display:grid;place-items:center}.icon-btn .i{width:20px;height:20px;vertical-align:0}
 .icon-btn:active{background:rgba(255,255,255,.3)}
 .stats{display:flex;gap:8px;margin-top:12px}
 .stat{flex:1;background:rgba(255,255,255,.16);border-radius:14px;padding:8px 6px;text-align:center;font-size:12px;opacity:.95}
@@ -256,18 +259,19 @@ input,button{font:inherit}
 main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px calc(88px + var(--sab))}
 .tab{display:none}.tab.on{display:block}
 .search{position:sticky;top:-14px;z-index:5;background:var(--bg);padding:6px 0 10px}
-.search input{width:100%;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:14px;padding:13px 16px;font-size:16px;outline:0}
+.sbox{position:relative}.sbox .i{position:absolute;inset-inline-start:14px;top:50%;transform:translateY(-50%);color:var(--mut);width:20px;height:20px;pointer-events:none}
+.search input{width:100%;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:14px;padding:13px 16px;padding-inline-start:44px;font-size:16px;outline:0}
 .chips{display:flex;gap:8px;margin-top:10px;overflow-x:auto}
-.chip{flex:none;border:0;background:var(--chip);color:var(--ink);border-radius:20px;padding:8px 16px;font-size:14px}
+.chip{display:inline-flex;align-items:center;gap:6px;flex:none;border:0;background:var(--chip);color:var(--ink);border-radius:20px;padding:8px 16px;font-size:14px}
 .chip.on{background:var(--pri);color:#fff}
 .rc{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
 .rc h3{margin:0 0 4px;font-size:16px;line-height:1.35;user-select:text;-webkit-user-select:text}
 .new{display:inline-block;background:var(--ok);color:#fff;border-radius:8px;font-size:11px;padding:1px 7px;margin-inline-start:6px;vertical-align:middle}
 .addr{color:var(--mut);font-size:13px;margin-bottom:8px}
 .meta{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin-bottom:10px;user-select:text;-webkit-user-select:text}
-.meta span{color:var(--mut)}.meta b{color:var(--ink);font-weight:600;direction:ltr;unicode-bidi:embed}
+.meta span{color:var(--mut);display:inline-flex;align-items:center;gap:5px}.meta .i{width:15px;height:15px;color:var(--mut)}.meta .i.f{color:#e0a030}.meta b{color:var(--ink);font-weight:600;direction:ltr;unicode-bidi:embed}
 .acts{display:flex;gap:8px;flex-wrap:wrap}
-.acts a{flex:1;min-width:84px;text-align:center;text-decoration:none;color:#fff;padding:11px 8px;border-radius:12px;font-size:14px;font-weight:600}
+.acts a{flex:1;min-width:84px;display:flex;align-items:center;justify-content:center;gap:6px;text-align:center;text-decoration:none;color:#fff;padding:11px 8px;border-radius:12px;font-size:14px;font-weight:600}
 .acts a:active{opacity:.75}
 .a-wa{background:#25d366}.a-mail{background:#2f6fed}.a-tel{background:#6b7280}.a-map{background:#e0793c}.a-web{background:#7c5cd6}
 .empty{text-align:center;color:var(--mut);padding:60px 20px;line-height:1.8}
@@ -279,7 +283,7 @@ main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px c
 .sw input{appearance:none;-webkit-appearance:none;flex:none;width:50px;height:30px;border-radius:15px;background:var(--chip);position:relative;transition:.2s;border:0}
 .sw input::after{content:"";position:absolute;top:3px;inset-inline-start:3px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:.2s}
 .sw input:checked{background:var(--ok)}.sw input:checked::after{inset-inline-start:23px}
-.btn{width:100%;border:0;border-radius:16px;padding:16px;font-size:17px;font-weight:700;color:#fff;background:var(--pri);box-shadow:0 4px 12px rgba(180,83,42,.3)}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;border:0;border-radius:16px;padding:16px;font-size:17px;font-weight:700;color:#fff;background:var(--pri);box-shadow:0 4px 12px rgba(180,83,42,.3)}
 .btn:active{transform:scale(.985)}.btn:disabled{opacity:.45;box-shadow:none}
 .btn.sec{background:var(--chip);color:var(--ink);box-shadow:none;font-weight:600;font-size:15px;padding:14px}
 .btn.red{background:#d64545}
@@ -293,14 +297,31 @@ main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px c
 .hint{color:var(--mut);font-size:13px;line-height:1.8}
 nav{position:fixed;bottom:0;left:0;right:0;max-width:640px;margin:0 auto;display:flex;background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--line);padding:6px 6px calc(6px + var(--sab));z-index:10}
 nav button{flex:1;border:0;background:transparent;color:var(--mut);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px;padding:6px 0;border-radius:12px}
-nav button .ic{font-size:23px;line-height:1.1}
+nav button .ic{width:24px;height:24px;vertical-align:0;stroke-width:1.9}
 nav button.on{color:var(--pri);font-weight:700}
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 21V12a8 8 0 0 1 16 0v9"/><path d="M9 21v-5a3 3 0 0 1 6 0v5"/><path d="M12 2v1.5"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4M12 16h4M8 11h.01M8 16h.01"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></symbol>
+<symbol id="i-mail" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></symbol>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+<symbol id="i-phone" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></symbol>
+<symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></symbol>
+<symbol id="i-smartphone" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+</defs></svg>
 <div id="app">
   <div class="top">
-    <div class="row1"><h1>🏯 Riads<small>مراكش</small></h1><button class="icon-btn" id="refresh" aria-label="تحديث">⟳</button></div>
+    <div class="row1"><h1><svg class="i logo"><use href="#i-logo"/></svg>Riads<small>مراكش</small></h1><button class="icon-btn" id="refresh" aria-label="تحديث"><svg class="i"><use href="#i-refresh"/></svg></button></div>
     <div class="stats">
       <div class="stat"><b id="sN">0</b>riads</div>
       <div class="stat"><b id="sE">0</b>بإيميل</div>
@@ -311,11 +332,11 @@ nav button.on{color:var(--pri);font-weight:700}
   <main>
     <section class="tab on" id="tab-list">
       <div class="search">
-        <input type="search" id="q" placeholder="🔎 ابحث بالاسم أو الإيميل أو الرقم" autocomplete="off">
+        <div class="sbox"><svg class="i"><use href="#i-search"/></svg><input type="search" id="q" placeholder="ابحث بالاسم أو الإيميل أو الرقم" autocomplete="off"></div>
         <div class="chips">
           <button class="chip on" id="cAll">الكل</button>
-          <button class="chip" id="cE">✉️ بإيميل</button>
-          <button class="chip" id="cW">💬 بواتساب</button>
+          <button class="chip" id="cE"><svg class="i"><use href="#i-mail"/></svg> بإيميل</button>
+          <button class="chip" id="cW"><svg class="i"><use href="#i-chat"/></svg> بواتساب</button>
         </div>
         <input type="checkbox" id="fE" hidden><input type="checkbox" id="fW" hidden>
       </div>
@@ -340,25 +361,26 @@ nav button.on{color:var(--pri);font-weight:700}
     <section class="tab" id="tab-more">
       <div class="panel">
         <h2>تصدير</h2>
-        <button class="btn sec" id="csv" disabled>⬇️ تحميل القائمة (CSV)</button>
+        <button class="btn sec" id="csv" disabled><svg class="i"><use href="#i-download"/></svg> تحميل القائمة (CSV)</button>
         <p class="hint">على الآيفون يفتح القائمة للمشاركة: اختر «حفظ في الملفات».</p>
       </div>
       <div class="panel">
         <h2>تثبيت التطبيق</h2>
         <p class="hint"><b>آيفون:</b> زر المشاركة ثم «إضافة إلى الشاشة الرئيسية».<br><b>أندرويد:</b> قائمة المتصفح ثم «تثبيت التطبيق».</p>
       </div>
-      <div class="panel"><button class="btn sec" id="out">تسجيل الخروج</button></div>
+      <div class="panel"><button class="btn sec" id="out"><svg class="i"><use href="#i-logout"/></svg> تسجيل الخروج</button></div>
     </section>
   </main>
 
   <nav>
-    <button class="on" data-tab="list"><span class="ic">📋</span>القائمة</button>
-    <button data-tab="search"><span class="ic">🔍</span>بحث</button>
-    <button data-tab="more"><span class="ic">⚙️</span>المزيد</button>
+    <button class="on" data-tab="list"><svg class="i ic"><use href="#i-list"/></svg>القائمة</button>
+    <button data-tab="search"><svg class="i ic"><use href="#i-search"/></svg>بحث</button>
+    <button data-tab="more"><svg class="i ic"><use href="#i-settings"/></svg>المزيد</button>
   </nav>
 </div>
 <script>
 const $=id=>document.getElementById(id);let ROWS=[],SHOW=40;
+const ic=(n,c)=>`<svg class="i${c?' '+c:''}"><use href="#i-${n}"/></svg>`;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function showTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+n));document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===n));$('app').querySelector('main').scrollTop=0}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
@@ -376,8 +398,8 @@ function render(){
     const tel=String(r.phones||'').split(';')[0].trim();
     return `<article class="rc"><h3>${esc(r.name)}${srcs(r).some(s=>FRESH.has(s))?'<span class="new">جديد</span>':''}</h3>
     <div class="addr">${esc(r.address)}</div>
-    <div class="meta">${r.rating?`<span>⭐ <b>${esc(r.rating)}</b> (${esc(r.reviews)})</span>`:''}${r.email?`<span>✉️ <b>${esc(r.email)}</b></span>`:''}${r.whatsapp?`<span>💬 <b>${esc(r.whatsapp)}</b>${r.whatsapp_status&&r.whatsapp_status!=='confirmed'?' <small>(محتمل)</small>':''}</span>`:''}${tel&&tel!==r.whatsapp?`<span>📞 <b>${esc(tel)}</b></span>`:''}</div>
-    <div class="acts">${r.whatsapp_link?`<a class="a-wa" href="${esc(r.whatsapp_link)}" target="_blank" rel="noopener">واتساب</a>`:''}${r.email?`<a class="a-mail" href="mailto:${esc(r.email)}">إيميل</a>`:''}${tel?`<a class="a-tel" href="tel:${esc(tel)}">اتصال</a>`:''}${r.maps_url?`<a class="a-map" href="${esc(r.maps_url)}" target="_blank" rel="noopener">الخريطة</a>`:''}${r.website?`<a class="a-web" href="${esc(r.website)}" target="_blank" rel="noopener">الموقع</a>`:''}</div></article>`}).join('')
+    <div class="meta">${r.rating?`<span>${ic('star','f')}<b>${esc(r.rating)}</b> (${esc(r.reviews)})</span>`:''}${r.email?`<span>${ic('mail')}<b>${esc(r.email)}</b></span>`:''}${r.whatsapp?`<span>${ic('chat')}<b>${esc(r.whatsapp)}</b>${r.whatsapp_status&&r.whatsapp_status!=='confirmed'?' <small>(محتمل)</small>':''}</span>`:''}${tel&&tel!==r.whatsapp?`<span>${ic('phone')}<b>${esc(tel)}</b></span>`:''}</div>
+    <div class="acts">${r.whatsapp_link?`<a class="a-wa" href="${esc(r.whatsapp_link)}" target="_blank" rel="noopener">${ic('chat')}واتساب</a>`:''}${r.email?`<a class="a-mail" href="mailto:${esc(r.email)}">${ic('mail')}إيميل</a>`:''}${tel?`<a class="a-tel" href="tel:${esc(tel)}">${ic('phone')}اتصال</a>`:''}${r.maps_url?`<a class="a-map" href="${esc(r.maps_url)}" target="_blank" rel="noopener">${ic('pin')}الخريطة</a>`:''}${r.website?`<a class="a-web" href="${esc(r.website)}" target="_blank" rel="noopener">${ic('globe')}الموقع</a>`:''}</div></article>`}).join('')
    +(list.length>SHOW?`<button class="more" id="more">عرض المزيد (${list.length-SHOW})</button>`:'');
   const m=$('more');if(m)m.onclick=()=>{SHOW+=40;render()};
 }
