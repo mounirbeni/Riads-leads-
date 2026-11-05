@@ -5,7 +5,9 @@
 import json
 import os
 import re
+import time
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -22,6 +24,11 @@ STOP = {"riad", "riads", "ryad", "ryads", "riyad", "hotel", "spa", "marrakech", 
 
 
 # ----------------------------------------------------------------- storage
+# سجلّ إضافات فقط (append-only): كل حفظ = ملف جديد باسم فريد، لا كتابة فوق ملف قديم أبداً.
+# هذا يمنع ضياع البيانات عند حفظين متزامنين أو عند قراءة نسخة قديمة من الكاش.
+LOG_PREFIX = "log/"
+
+
 def _read_bytes(res):
     body = res.body
     if isinstance(body, (bytes, bytearray)):
@@ -31,32 +38,68 @@ def _read_bytes(res):
     return b"".join(body)
 
 
+def _blob_json(pathname):
+    from vercel.blob import sync as blob
+    return json.loads(_read_bytes(blob.get_blob(pathname, access="private")).decode("utf-8"))
+
+
+def _apply(rows, op):
+    if op.get("op") == "del":
+        gone = set(op.get("sources", []))
+        return [r for r in rows if not (sources_of(r) & gone)]
+    return add_rows(rows, op.get("rows", []))[0]
+
+
 def load():
-    try:
-        if USE_BLOB:
-            from vercel.blob import sync as blob
-            res = blob.get_blob(BLOB_PATH, access="private")
-            return json.loads(_read_bytes(res).decode("utf-8")).get("rows", [])
-        with open(LOCAL_PATH, encoding="utf-8") as f:
-            return json.load(f).get("rows", [])
-    except FileNotFoundError:
-        return []
-    except Exception as e:  # noqa: BLE001
-        if e.__class__.__name__ == "BlobNotFoundError":
+    if not USE_BLOB:
+        try:
+            with open(LOCAL_PATH, encoding="utf-8") as f:
+                return json.load(f).get("rows", [])
+        except FileNotFoundError:
             return []
-        raise
+    from concurrent.futures import ThreadPoolExecutor
+    from vercel.blob import sync as blob
+    rows = []
+    try:  # النسخة القديمة (قبل نظام السجلّ) إن وُجدت
+        rows = _blob_json(BLOB_PATH).get("rows", [])
+    except Exception as e:  # noqa: BLE001
+        if e.__class__.__name__ != "BlobNotFoundError":
+            raise
+    names = sorted(b.pathname for b in blob.query_blobs(prefix=LOG_PREFIX))
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        ops = list(ex.map(_blob_json, names))
+    for op in ops:  # بترتيب الزمن
+        rows = _apply(rows, op)
+    return sorted(rows, key=lambda r: (not r.get("email"), not r.get("whatsapp"), (r.get("name") or "").lower()))
 
 
-def save(rows):
-    data = json.dumps({"rows": rows}, ensure_ascii=False).encode("utf-8")
+def _append(op):
     if USE_BLOB:
         from vercel.blob import sync as blob
-        blob.put_blob(BLOB_PATH, data, access="private", content_type="application/json",
-                      add_random_suffix=False, allow_overwrite=True, cache_control_max_age=60)
-    else:
+        name = f"{LOG_PREFIX}{int(time.time() * 1000):013d}-{uuid.uuid4().hex[:8]}.json"
+        blob.put_blob(name, json.dumps(op, ensure_ascii=False).encode("utf-8"), access="private",
+                      content_type="application/json", add_random_suffix=False, allow_overwrite=False)
+    else:  # محلياً: ملف واحد
+        rows = _apply(load(), op)
         os.makedirs(os.path.dirname(LOCAL_PATH), exist_ok=True)
-        with open(LOCAL_PATH, "wb") as f:
-            f.write(data)
+        with open(LOCAL_PATH, "w", encoding="utf-8") as f:
+            json.dump({"rows": rows}, f, ensure_ascii=False)
+
+
+def save_add(incoming):
+    """يحفظ نتائج جديدة. يعيد (كل الصفوف، عدد المضاف، مصادر المضاف)."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    incoming = [dict(r, added_at=r.get("added_at") or now) for r in incoming]
+    current = load()
+    rows, added, added_src = add_rows(current, incoming)
+    if incoming:
+        _append({"op": "add", "rows": incoming})
+    return rows, added, added_src
+
+
+def delete(sources):
+    _append({"op": "del", "sources": list(sources)})
+    return load()
 
 
 # ----------------------------------------------------------------- dedupe

@@ -131,8 +131,7 @@ def save():
     """يدمج نتائج بحث جديدة مع المحفوظ دون أي تكرار."""
     incoming = (request.get_json(force=True) or {}).get("rows", [])
     try:
-        rows, added, added_src = store.add_rows(store.load(), incoming)
-        store.save(rows)
+        rows, added, added_src = store.save_add(incoming)
         return jsonify(rows=rows, added=added, added_sources=added_src)
     except Exception as e:  # noqa: BLE001
         return jsonify(error="تعذر الحفظ: " + str(e)), 500
@@ -143,9 +142,7 @@ def delete():
     """يحذف رياضاً من القاعدة بمعرّف المصدر (source)."""
     gone = {str(s) for s in (request.get_json(force=True) or {}).get("sources", [])}
     try:
-        rows = [r for r in store.load() if not (store.sources_of(r) & gone)]
-        store.save(rows)
-        return jsonify(rows=rows)
+        return jsonify(rows=store.delete(gone))
     except Exception as e:  # noqa: BLE001
         return jsonify(error=str(e)), 500
 
