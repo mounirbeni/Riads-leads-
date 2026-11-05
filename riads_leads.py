@@ -2,14 +2,13 @@
 """
 Riads Leads - Marrakech only.
 
-1) يجمع كل الرياضات (riads) داخل مراكش فقط من OpenStreetMap (Overpass API).
+1) يجمع كل الرياضات (riads) داخل مراكش فقط من Google Maps (Places API).
 2) يزور موقع كل رياض ويستخرج: الإيميلات + أرقام الواتساب/الهاتف.
 3) يحفظ النتيجة في CSV (يفتح مباشرة في Excel).
 
 Usage:
-    python3 riads_leads.py                    # كل شيء -> riads_marrakech.csv
-    python3 riads_leads.py --no-crawl         # بدون زيارة المواقع (أسرع)
-    python3 riads_leads.py --extra-urls my_urls.txt   # أضف مواقع riads من عندك (سطر لكل رابط)
+    python3 app.py                            # الموقع -> http://localhost:5000
+    python3 riads_leads.py --key API_KEY      # بدون موقع -> riads_marrakech.csv
 """
 import argparse
 import csv
@@ -26,15 +25,8 @@ from bs4 import BeautifulSoup
 # حدود مدينة مراكش (south, west, north, east) - أي نتيجة خارجها تُحذف
 MARRAKECH_BBOX = (31.55, -8.12, 31.72, -7.90)
 
-OVERPASS_MIRRORS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-]
-
 UA = {"User-Agent": "Mozilla/5.0 (compatible; RiadsLeadsBot/1.0)"}
 
-RIAD_NAME_RE = re.compile(r"\b(riad|ryad|riyad|dar)\b|ryad|riad", re.I)
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 JUNK_EMAIL_PARTS = (
     "example.", "sentry", "wixpress", "domain.com", "email.com", "yourdomain",
@@ -102,35 +94,53 @@ def decode_cf_email(hexstr: str):
         return None
 
 
-# ----------------------------------------------------------------- OSM
-def overpass_query():
-    s, w, n, e = MARRAKECH_BBOX
-    bbox = f"({s},{w},{n},{e})"
-    return f"""
-[out:json][timeout:120];
-(
-  nwr["tourism"~"guest_house|hotel|hostel|apartment"]["name"~"riad|ryad|riyad|^dar |^dar-",i]{bbox};
-  nwr["tourism"="guest_house"]["guest_house"="riad"]{bbox};
-  nwr["name"~"riad|ryad",i]["tourism"]{bbox};
-);
-out center tags;
-"""
+# ----------------------------------------------------------------- Google Maps
+PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
+FIELD_MASK = ",".join([
+    "places.id", "places.displayName", "places.formattedAddress", "places.location",
+    "places.nationalPhoneNumber", "places.internationalPhoneNumber", "places.websiteUri",
+    "places.googleMapsUri", "places.rating", "places.userRatingCount", "places.types",
+    "places.businessStatus", "nextPageToken",
+])
+QUERIES = ["riad Marrakech", "ryad Marrakech", "riad medina Marrakech", "riad hotel Marrakech"]
+GRID = 4  # GRID x GRID خلايا فوق مراكش لتجاوز حد 60 نتيجة لكل بحث
+RIAD_NAME = re.compile(r"riad|ryad|riyad|ryads|رياض", re.I)
 
 
-def fetch_osm_riads():
-    q = overpass_query()
-    last = None
-    for url in OVERPASS_MIRRORS:
-        try:
-            print(f"[osm] {url}")
-            r = requests.post(url, data={"data": q}, headers=UA, timeout=150)
-            r.raise_for_status()
-            return r.json().get("elements", [])
-        except Exception as ex:  # noqa: BLE001
-            last = ex
-            print(f"[osm] failed: {ex}")
-            time.sleep(2)
-    raise SystemExit(f"Could not reach Overpass API: {last}")
+def grid_cells(n=GRID):
+    s, w, nn, e = MARRAKECH_BBOX
+    dl, dn = (nn - s) / n, (e - w) / n
+    for i in range(n):
+        for j in range(n):
+            yield (s + i * dl, w + j * dn, s + (i + 1) * dl, w + (j + 1) * dn)
+
+
+def search_cell(api_key, query, cell, stop=lambda: False):
+    """كل صفحات البحث (حتى 60 نتيجة) داخل خلية واحدة."""
+    s, w, n, e = cell
+    body = {
+        "textQuery": query, "pageSize": 20,
+        "locationRestriction": {"rectangle": {
+            "low": {"latitude": s, "longitude": w}, "high": {"latitude": n, "longitude": e}}},
+    }
+    headers = {"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": FIELD_MASK, "Content-Type": "application/json"}
+    for _ in range(3):
+        if stop():
+            return
+        r = requests.post(PLACES_URL, json=body, headers=headers, timeout=30)
+        if r.status_code != 200:
+            try:
+                msg = r.json()["error"]["message"]
+            except Exception:  # noqa: BLE001
+                msg = r.text[:200]
+            raise RuntimeError(f"Google API {r.status_code}: {msg}")
+        data = r.json()
+        yield from data.get("places", [])
+        tok = data.get("nextPageToken")
+        if not tok:
+            return
+        body["pageToken"] = tok
+        time.sleep(1.5)
 
 
 def in_marrakech(lat, lon):
@@ -138,44 +148,51 @@ def in_marrakech(lat, lon):
     return lat is not None and lon is not None and s <= lat <= n and w <= lon <= e
 
 
-def element_to_lead(el):
-    t = el.get("tags", {})
-    name = t.get("name") or t.get("name:fr") or t.get("name:en")
-    if not name:
+def place_to_lead(p):
+    name = (p.get("displayName") or {}).get("text", "").strip()
+    addr = p.get("formattedAddress", "")
+    loc = p.get("location") or {}
+    lat, lon = loc.get("latitude"), loc.get("longitude")
+    if not name or not in_marrakech(lat, lon):
         return None
-    lat = el.get("lat") or (el.get("center") or {}).get("lat")
-    lon = el.get("lon") or (el.get("center") or {}).get("lon")
-    if not in_marrakech(lat, lon):
+    if not re.search(r"marrakech|marrakesh|مراكش", addr, re.I):
+        return None  # Marrakech فقط
+    if p.get("businessStatus") == "CLOSED_PERMANENTLY":
         return None
-    city = (t.get("addr:city") or "").lower()
-    if city and not re.search(r"marrakech|marrakesh|مراكش", city):
-        return None  # مدينة أخرى مكتوبة صراحة -> نستبعد
-
-    phones, whatsapps = [], []
-    for k in ("phone", "contact:phone", "mobile", "contact:mobile"):
-        for part in re.split(r"[;,]", t.get(k, "")):
-            n = normalize_ma_phone(part)
-            if n and n not in phones:
-                phones.append(n)
-    for k in ("contact:whatsapp", "whatsapp"):
-        for part in re.split(r"[;,]", t.get(k, "")):
-            n = normalize_ma_phone(part)
-            if n and n not in whatsapps:
-                whatsapps.append(n)
-    emails = clean_emails(re.split(r"[;,\s]+", (t.get("email", "") + ";" + t.get("contact:email", ""))))
-    website = t.get("website") or t.get("contact:website") or ""
-    if website and not website.startswith("http"):
-        website = "http://" + website
+    if not RIAD_NAME.search(name):
+        return None  # riads فقط (لا فنادق ولا مطاعم)
+    phones = []
+    for key in ("internationalPhoneNumber", "nationalPhoneNumber"):
+        n = normalize_ma_phone(p.get(key, ""))
+        if n and n not in phones:
+            phones.append(n)
     return {
-        "name": name.strip(),
-        "address": " ".join(filter(None, [t.get("addr:housenumber"), t.get("addr:street"), t.get("addr:suburb")])),
-        "lat": lat, "lon": lon,
-        "website": website,
-        "emails": emails,
-        "phones": phones,
-        "whatsapps": whatsapps,
-        "source": f"osm:{el.get('type')}/{el.get('id')}",
+        "name": name, "address": addr, "lat": lat, "lon": lon,
+        "website": p.get("websiteUri", ""), "maps_url": p.get("googleMapsUri", ""),
+        "rating": p.get("rating", ""), "reviews": p.get("userRatingCount", ""),
+        "emails": [], "phones": phones, "whatsapps": [], "source": f"google:{p.get('id')}",
     }
+
+
+def fetch_google_riads(api_key, progress=lambda m: None, stop=lambda: False):
+    leads, seen = {}, set()
+    cells = list(grid_cells())
+    total = len(cells) * len(QUERIES)
+    done = 0
+    for q in QUERIES:
+        for cell in cells:
+            if stop():
+                return list(leads.values())
+            for p in search_cell(api_key, q, cell, stop):
+                if p.get("id") in seen:
+                    continue
+                seen.add(p.get("id"))
+                lead = place_to_lead(p)
+                if lead:
+                    leads[p["id"]] = lead
+            done += 1
+            progress(f"بحث Google Maps {done}/{total} - وُجد {len(leads)} رياض")
+    return list(leads.values())
 
 
 # ----------------------------------------------------------------- crawl
@@ -279,74 +296,49 @@ def finalize(lead):
         "phones": "; ".join(lead["phones"]),
         "website": lead["website"],
         "address": lead["address"],
+        "maps_url": lead.get("maps_url", ""),
+        "rating": lead.get("rating", ""), "reviews": lead.get("reviews", ""),
         "lat": lead["lat"], "lon": lead["lon"],
         "source": lead["source"],
     }
 
 
-def read_extra_urls(path):
-    leads = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            u = line.strip()
-            if not u or u.startswith("#"):
-                continue
-            if not u.startswith("http"):
-                u = "https://" + u
-            host = urlparse(u).netloc.replace("www.", "")
-            leads.append({"name": host, "address": "", "lat": "", "lon": "", "website": u,
-                          "emails": [], "phones": [], "whatsapps": [], "source": "extra-urls"})
-    return leads
+def collect(api_key, crawl=True, workers=10, progress=lambda m: None, stop=lambda: False):
+    leads = fetch_google_riads(api_key, progress, stop)
+    if crawl:
+        todo = [l for l in leads if l["website"]]
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(enrich, l) for l in todo]
+            for f in as_completed(futs):
+                try:
+                    f.result()
+                except Exception:  # noqa: BLE001
+                    pass
+                done += 1
+                progress(f"زيارة المواقع {done}/{len(todo)} لاستخراج الإيميل والواتساب")
+                if stop():
+                    break
+    rows = [finalize(l) for l in leads]
+    rows.sort(key=lambda r: (not r["email"], not r["whatsapp"], r["name"].lower()))
+    return rows
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Riads Marrakech leads: emails + WhatsApp")
+    import os
+    ap = argparse.ArgumentParser(description="Riads Marrakech leads (Google Maps)")
     ap.add_argument("-o", "--output", default="riads_marrakech.csv")
-    ap.add_argument("--no-crawl", action="store_true", help="skip visiting websites")
-    ap.add_argument("--extra-urls", help="text file with extra riad website URLs (one per line)")
-    ap.add_argument("--workers", type=int, default=10)
+    ap.add_argument("--key", default=os.environ.get("GOOGLE_MAPS_API_KEY"))
+    ap.add_argument("--no-crawl", action="store_true")
     args = ap.parse_args()
-
-    leads, seen = [], set()
-    for el in fetch_osm_riads():
-        lead = element_to_lead(el)
-        if not lead:
-            continue
-        key = re.sub(r"\W+", "", lead["name"].lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        leads.append(lead)
-    print(f"[osm] {len(leads)} riads in Marrakech")
-
-    if args.extra_urls:
-        known = {urlparse(l["website"]).netloc.replace("www.", "") for l in leads if l["website"]}
-        for l in read_extra_urls(args.extra_urls):
-            if urlparse(l["website"]).netloc.replace("www.", "") not in known:
-                leads.append(l)
-
-    if not args.no_crawl:
-        todo = [l for l in leads if l["website"]]
-        print(f"[crawl] visiting {len(todo)} websites...")
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = [ex.submit(enrich, l) for l in todo]
-            for i, f in enumerate(as_completed(futs), 1):
-                try:
-                    f.result()
-                except Exception as e:  # noqa: BLE001
-                    print(f"  error: {e}", file=sys.stderr)
-                if i % 20 == 0:
-                    print(f"  {i}/{len(todo)}")
-
-    rows = [finalize(l) for l in leads]
-    rows.sort(key=lambda r: (not r["email"], not r["whatsapp"], r["name"].lower()))
-    cols = list(rows[0].keys()) if rows else ["name"]
+    if not args.key:
+        raise SystemExit("ضع GOOGLE_MAPS_API_KEY أو استعمل --key")
+    rows = collect(args.key, not args.no_crawl, progress=print)
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["name"])
         w.writeheader()
         w.writerows(rows)
-    print(f"[done] {len(rows)} riads | with email: {sum(1 for r in rows if r['email'])} | "
-          f"with WhatsApp: {sum(1 for r in rows if r['whatsapp'])} -> {args.output}")
+    print(f"{len(rows)} riads -> {args.output}")
 
 
 if __name__ == "__main__":
