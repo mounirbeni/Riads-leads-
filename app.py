@@ -92,8 +92,9 @@ def search():
     last = None
     for key in order:
         try:
-            leads = [l for l in map(core.place_to_lead, core.search_cell(key, q, c)) if l]
-            return jsonify(leads=leads)
+            places = list(core.search_cell(key, q, c))
+            leads = [l for l in map(core.place_to_lead, places) if l]
+            return jsonify(leads=leads, raw=len(places))
         except Exception as e:  # noqa: BLE001
             last = e
             if "Google API 429" in str(e):
@@ -208,6 +209,7 @@ td.act a{margin:2px;padding:4px 10px;font-size:13px;border-radius:6px;color:#fff
 <div class="card">
   <div class="row">
     <label><input type="checkbox" id="crawl" checked> استخراج الإيميل/الواتساب من مواقعهم</label>
+    <label><input type="checkbox" id="wide"> بحث موسّع (يستهلك أكثر من حصة Google)</label>
   </div>
   <div class="row" style="margin-top:10px">
     <button id="go">ابدأ البحث</button>
@@ -279,12 +281,19 @@ $('go').onclick=async()=>{
   try{
     const plan=await (await fetch('/api/plan')).json();
     if(!plan.configured)throw new Error('API key غير مضبوط على الخادم');
-    const tasks=[];for(let q=0;q<plan.queries;q++)for(let c=0;c<plan.cells;c++)tasks.push({q,cell:c});
-    const found=new Map();let done=0,failed=0,lastErr='',quota=false;
-    await pool(tasks,8,async t=>{
-      try{(await post('/api/search',t)).leads.forEach(l=>found.set(l.source,l))}catch(e){failed++;lastErr=e.message;if(/Google API 429|Quota/i.test(lastErr))quota=true}
-      done++;$('msg').textContent=`بحث Google Maps ${done}/${tasks.length} - وُجد ${found.size} رياض`;
-    },t0+LIMIT*SEARCH_SHARE,()=>!quota);
+    // توفير الاستهلاك: الكلمة الأولى على كل الخلايا، وباقي الكلمات فقط على الخلايا "المشبعة" (≥50 نتيجة = قد يكون فيها المزيد)
+    const found=new Map(),sat={};let done=0,failed=0,lastErr='',quota=false,sent=0;
+    const wide=$('wide').checked,SEARCH_END=t0+LIMIT*SEARCH_SHARE;
+    for(let q=0;q<plan.queries&&!stopFlag&&!quota&&Date.now()<SEARCH_END;q++){
+      const cells=[];for(let c=0;c<plan.cells;c++)if(q===0||wide||(sat[c]||0)>=50)cells.push(c);
+      if(!cells.length)break;
+      await pool(cells,8,async c=>{
+        sent++;
+        try{const r=await post('/api/search',{q,cell:c});r.leads.forEach(l=>found.set(l.source,l));sat[c]=Math.max(sat[c]||0,r.raw||0)}
+        catch(e){failed++;lastErr=e.message;if(/Google API 429|Quota/i.test(lastErr))quota=true}
+        done++;$('msg').textContent=`بحث Google Maps: كلمة ${q+1}/${plan.queries} - ${done} طلب - وُجد ${found.size} رياض`;
+      },SEARCH_END,()=>!quota);
+    }
     if(done&&failed===done&&!quota)throw new Error(lastErr);
     const leads=[...found.values()].filter(l=>!KNOWN.has(l.source)),doCrawl=$('crawl').checked,seen=new Set();let n=0;
     const already=found.size-leads.length;
