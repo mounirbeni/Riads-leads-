@@ -4,58 +4,67 @@
     pip install -r requirements.txt
     python3 app.py            ->  http://localhost:5000
 """
+import ipaddress
 import os
-import threading
-import uuid
+import socket
+from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request
 
 import riads_leads as core
 
 app = Flask(__name__)
-JOBS = {}  # job_id -> {status, message, rows, error, stop}
+KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+CELLS = list(core.grid_cells())
 
 
-def run_job(job_id, key, crawl):
-    job = JOBS[job_id]
+def public_url(u):
+    """حماية SSRF: فقط http(s) إلى عناوين عامة."""
     try:
-        job["rows"] = core.collect(
-            key, crawl,
-            progress=lambda m: job.update(message=m),
-            stop=lambda: job["stop"],
-        )
-        job["status"] = "stopped" if job["stop"] else "done"
-        job["message"] = f"انتهى: {len(job['rows'])} رياض"
+        p = urlparse(u)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        for info in socket.getaddrinfo(p.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@app.get("/api/plan")
+def plan():
+    return jsonify(queries=len(core.QUERIES), cells=len(CELLS), configured=bool(KEY))
+
+
+@app.post("/api/search")
+def search():
+    """طلب واحد قصير: استعلام واحد في خلية واحدة (يناسب حدود Vercel)."""
+    if not KEY:
+        return jsonify(error="GOOGLE_MAPS_API_KEY غير مضبوط على الخادم"), 500
+    d = request.get_json(force=True)
+    try:
+        q, c = core.QUERIES[int(d["q"])], CELLS[int(d["cell"])]
+        leads = [l for l in map(core.place_to_lead, core.search_cell(KEY, q, c)) if l]
+        return jsonify(leads=leads)
     except Exception as e:  # noqa: BLE001
-        job["status"], job["error"] = "error", str(e)
+        return jsonify(error=str(e)), 502
 
 
-@app.post("/api/start")
-def start():
-    data = request.get_json(force=True)
-    key = (data.get("key") or os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip()
-    if not key:
-        return jsonify(error="أدخل Google Maps API key"), 400
-    job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "running", "message": "بدأ...", "rows": [], "error": None, "stop": False}
-    threading.Thread(target=run_job, args=(job_id, key, bool(data.get("crawl", True))), daemon=True).start()
-    return jsonify(job=job_id)
-
-
-@app.get("/api/status/<job_id>")
-def status(job_id):
-    j = JOBS.get(job_id)
-    if not j:
-        return jsonify(error="not found"), 404
-    return jsonify(status=j["status"], message=j["message"], error=j["error"],
-                   rows=j["rows"] if j["status"] != "running" else [])
-
-
-@app.post("/api/stop/<job_id>")
-def stop(job_id):
-    if job_id in JOBS:
-        JOBS[job_id]["stop"] = True
-    return jsonify(ok=True)
+@app.post("/api/enrich")
+def enrich():
+    """يزور موقع رياض واحد ويستخرج الإيميل والواتساب ثم يعيد الصف النهائي."""
+    lead = request.get_json(force=True)
+    lead = {k: lead.get(k, "") for k in ("name", "address", "lat", "lon", "website", "maps_url",
+                                          "rating", "reviews", "source")} | {
+        "emails": [], "whatsapps": [], "phones": list(lead.get("phones") or [])}
+    if lead["website"] and public_url(lead["website"]):
+        try:
+            core.enrich(lead)
+        except Exception:  # noqa: BLE001
+            pass
+    return jsonify(row=core.finalize(lead))
 
 
 @app.get("/")
@@ -98,7 +107,6 @@ td.act a{margin:2px;padding:4px 10px;font-size:13px;border-radius:6px;color:#fff
 
 <div class="card">
   <div class="row">
-    <input id="key" type="password" placeholder="Google Maps API key (Places API New)" autocomplete="off">
     <label><input type="checkbox" id="crawl" checked> استخراج الإيميل/الواتساب من مواقعهم</label>
   </div>
   <div class="row" style="margin-top:10px">
@@ -129,8 +137,7 @@ td.act a{margin:2px;padding:4px 10px;font-size:13px;border-radius:6px;color:#fff
 </div>
 </div>
 <script>
-const $=id=>document.getElementById(id);let ROWS=[],job=null,timer=null;
-try{$('key').value=localStorage.getItem('gkey')||''}catch(e){}
+const $=id=>document.getElementById(id);let ROWS=[];
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function render(){
   const q=$('q').value.toLowerCase(),fe=$('fE').checked,fw=$('fW').checked;
@@ -148,21 +155,34 @@ function render(){
 }
 ['q','fE','fW'].forEach(i=>$(i).addEventListener('input',render));
 function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none'}
+let stopFlag=false;
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d}
+async function pool(items,n,fn){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length&&!stopFlag){const x=items[i++];await fn(x)}}))}
 $('go').onclick=async()=>{
-  $('err').textContent='';const key=$('key').value.trim();
-  try{localStorage.setItem('gkey',key)}catch(e){}
-  const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,crawl:$('crawl').checked})});
-  const d=await r.json();if(!r.ok){$('err').textContent=d.error;return}
-  job=d.job;busy(true);ROWS=[];render();$('csv').disabled=true;
-  timer=setInterval(poll,2000);
+  $('err').textContent='';stopFlag=false;ROWS=[];render();busy(true);$('csv').disabled=true;
+  try{
+    const plan=await (await fetch('/api/plan')).json();
+    if(!plan.configured)throw new Error('API key غير مضبوط على الخادم');
+    const tasks=[];for(let q=0;q<plan.queries;q++)for(let c=0;c<plan.cells;c++)tasks.push({q,cell:c});
+    const found=new Map();let done=0,failed=0,lastErr='';
+    await pool(tasks,4,async t=>{
+      try{(await post('/api/search',t)).leads.forEach(l=>found.set(l.source,l))}catch(e){failed++;lastErr=e.message}
+      done++;$('msg').textContent=`بحث Google Maps ${done}/${tasks.length} - وُجد ${found.size} رياض`;
+    });
+    if(failed===tasks.length)throw new Error(lastErr);
+    const leads=[...found.values()],doCrawl=$('crawl').checked;let n=0;
+    await pool(leads,6,async l=>{
+      try{ROWS.push((await post('/api/enrich',doCrawl?l:{...l,website:''})).row)}catch(e){}
+      n++;$('msg').textContent=`استخراج الإيميل والواتساب ${n}/${leads.length}`;
+      if(n%5===0)render();
+    });
+    ROWS.sort((a,b)=>(!a.email)-(!b.email)||(!a.whatsapp)-(!b.whatsapp)||a.name.localeCompare(b.name));
+    $('msg').textContent=stopFlag?'تم الإيقاف':`انتهى: ${ROWS.length} رياض`;
+    if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;
+  }catch(e){$('err').textContent=e.message}
+  busy(false);render();$('csv').disabled=!ROWS.length;
 };
-async function poll(){
-  const d=await (await fetch('/api/status/'+job)).json();$('msg').textContent=d.message||'';
-  if(d.status!=='running'){clearInterval(timer);busy(false);
-    if(d.error)$('err').textContent=d.error;
-    ROWS=d.rows||[];render();$('csv').disabled=!ROWS.length}
-}
-$('stop').onclick=()=>{fetch('/api/stop/'+job,{method:'POST'});$('msg').textContent='جاري الإيقاف...'};
+$('stop').onclick=()=>{stopFlag=true;$('msg').textContent='جاري الإيقاف...'};
 $('csv').onclick=()=>{
   const cols=Object.keys(ROWS[0]);
   const csv='﻿'+[cols.join(',')].concat(ROWS.map(r=>cols.map(c=>'"'+String(r[c]??'').replace(/"/g,'""')+'"').join(','))).join('\n');
