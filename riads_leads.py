@@ -102,7 +102,7 @@ FIELD_MASK = ",".join([
     "places.googleMapsUri", "places.rating", "places.userRatingCount", "places.types",
     "places.businessStatus", "nextPageToken",
 ])
-QUERIES = ["riad Marrakech", "ryad Marrakech", "riad medina Marrakech", "riad hotel Marrakech"]
+QUERIES = ["riad", "riads", "riads in Marrakesh", "riads in Marrakech"]
 GRID = 4  # GRID x GRID خلايا فوق مراكش لتجاوز حد 60 نتيجة لكل بحث
 RIAD_NAME = re.compile(r"riad|ryad|riyad|ryads|رياض", re.I)
 
