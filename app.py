@@ -83,7 +83,7 @@ def search():
         leads = [l for l in map(core.place_to_lead, core.search_cell(KEY, q, c)) if l]
         return jsonify(leads=leads)
     except Exception as e:  # noqa: BLE001
-        return jsonify(error=str(e)), 502
+        return jsonify(error=str(e)), (429 if "Google API 429" in str(e) else 502)
 
 
 @app.post("/api/enrich")
@@ -245,7 +245,7 @@ function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display
 let stopFlag=false;
 const LIMIT=120000,SEARCH_SHARE=0.6; // 2 دقيقة كحد أقصى للعملية كاملة
 async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});if(r.status===401){location.reload();return}const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d}
-async function pool(items,n,fn,deadline){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length&&!stopFlag&&Date.now()<deadline){await fn(items[i++])}}))}
+async function pool(items,n,fn,deadline,ok=()=>true){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length&&!stopFlag&&ok()&&Date.now()<deadline){await fn(items[i++])}}))}
 function plain(l){ // صف بدون زيارة الموقع (عند انتهاء الوقت)
   const mob=(l.phones||[]).find(p=>/^\+212[67]/.test(p));
   return {name:l.name,email:'',other_emails:'',whatsapp:mob||'',whatsapp_status:mob?'likely (mobile)':'',whatsapp_link:mob?'https://wa.me/'+mob.slice(1):'',phones:(l.phones||[]).join('; '),website:l.website,address:l.address,maps_url:l.maps_url||'',rating:l.rating,reviews:l.reviews,lat:l.lat,lon:l.lon,source:l.source}}
@@ -264,12 +264,12 @@ $('go').onclick=async()=>{
     const plan=await (await fetch('/api/plan')).json();
     if(!plan.configured)throw new Error('API key غير مضبوط على الخادم');
     const tasks=[];for(let q=0;q<plan.queries;q++)for(let c=0;c<plan.cells;c++)tasks.push({q,cell:c});
-    const found=new Map();let done=0,failed=0,lastErr='';
+    const found=new Map();let done=0,failed=0,lastErr='',quota=false;
     await pool(tasks,8,async t=>{
-      try{(await post('/api/search',t)).leads.forEach(l=>found.set(l.source,l))}catch(e){failed++;lastErr=e.message}
+      try{(await post('/api/search',t)).leads.forEach(l=>found.set(l.source,l))}catch(e){failed++;lastErr=e.message;if(/Google API 429|Quota/i.test(lastErr))quota=true}
       done++;$('msg').textContent=`بحث Google Maps ${done}/${tasks.length} - وُجد ${found.size} رياض`;
-    },t0+LIMIT*SEARCH_SHARE);
-    if(done&&failed===done)throw new Error(lastErr);
+    },t0+LIMIT*SEARCH_SHARE,()=>!quota);
+    if(done&&failed===done&&!quota)throw new Error(lastErr);
     const leads=[...found.values()].filter(l=>!KNOWN.has(l.source)),doCrawl=$('crawl').checked,seen=new Set();let n=0;
     const already=found.size-leads.length;
     if(doCrawl)await pool(leads,12,async l=>{
@@ -282,7 +282,8 @@ $('go').onclick=async()=>{
     const saved=await post('/api/save',{rows:NEW});
     ROWS=STORED=saved.rows;FRESH=new Set(saved.added_sources);
     $('msg').textContent=(stopFlag?'تم الإيقاف':'انتهى')+`: أُضيف ${saved.added} رياض جديد، المجموع المحفوظ ${ROWS.length}`+(already?` (تخطّيت ${already} موجودة سابقاً)`:'')+(doCrawl&&left?` — ${left} لم يُفحص موقعها بسبب حد الوقت`:'');
-    if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;
+    if(quota)$('err').textContent='توقف البحث: تجاوز مشروع Google حصته اليومية (SearchTextRequest per day). ارفع الحصة من Google Cloud ← APIs & Services ← Places API (New) ← Quotas، أو أعد المحاولة غداً. ما وُجد قبل التوقف تم حفظه.';
+    else if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;
   }catch(e){$('err').textContent=e.message}
   clearInterval(tick);busy(false);render();$('csv').disabled=!ROWS.length;
 };
