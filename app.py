@@ -4,17 +4,50 @@
     pip install -r requirements.txt
     python3 app.py            ->  http://localhost:5000
 """
+import hashlib
+import hmac
 import ipaddress
 import os
 import socket
+import time
 from urllib.parse import urlparse
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, make_response, request
 
 import riads_leads as core
 
 app = Flask(__name__)
 KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
+TOKEN = hmac.new(("riads|" + ACCESS_CODE + "|" + KEY).encode(), b"ok", hashlib.sha256).hexdigest()
+
+
+def authed():
+    return bool(ACCESS_CODE) and hmac.compare_digest(request.cookies.get("auth", ""), TOKEN)
+
+
+@app.before_request
+def guard():
+    if request.path.startswith("/api/") and request.path != "/api/login" and not authed():
+        return jsonify(error="غير مسجّل الدخول"), 401
+
+
+@app.post("/api/login")
+def login():
+    code = str((request.get_json(silent=True) or {}).get("code", ""))
+    if not ACCESS_CODE or not hmac.compare_digest(code.encode(), ACCESS_CODE.encode()):
+        time.sleep(1)  # إبطاء تخمين الكود
+        return jsonify(error="الكود غير صحيح"), 401
+    resp = make_response(jsonify(ok=True))
+    resp.set_cookie("auth", TOKEN, max_age=30 * 86400, httponly=True, secure=request.is_secure, samesite="Lax")
+    return resp
+
+
+@app.post("/api/logout")
+def logout():
+    resp = make_response(jsonify(ok=True))
+    resp.delete_cookie("auth")
+    return resp
 CELLS = list(core.grid_cells())
 
 
@@ -69,8 +102,28 @@ def enrich():
 
 @app.get("/")
 def index():
-    return PAGE
+    return PAGE if authed() else LOGIN
 
+
+LOGIN = r"""<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riads Leads - دخول</title>
+<style>
+:root{--bg:#faf6f0;--card:#fff;--ink:#2b2118;--pri:#b4532a;--line:#eadfce}
+@media(prefers-color-scheme:dark){:root{--bg:#1c1713;--card:#272019;--ink:#f3e9dc;--line:#3a3026}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);font-family:system-ui,"Segoe UI",Tahoma,sans-serif}
+form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px;width:min(340px,calc(100vw - 32px));text-align:center}
+input{width:100%;padding:12px;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font-size:18px;text-align:center;box-sizing:border-box}
+button{width:100%;background:var(--pri);color:#fff;border:0;border-radius:8px;padding:12px;font-size:16px;cursor:pointer}
+#e{color:#c0392b;min-height:20px;margin-top:8px}
+</style></head><body>
+<form id="f"><h2>🏯 Riads Leads</h2><div>أدخل كود الدخول</div>
+<input id="c" type="password" autocomplete="current-password" autofocus><button>دخول</button><div id="e"></div></form>
+<script>
+document.getElementById('f').onsubmit=async e=>{e.preventDefault();
+const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('c').value})});
+if(r.ok)location.reload();else document.getElementById('e').textContent=(await r.json()).error;};
+</script></body></html>"""
 
 PAGE = r"""<!doctype html>
 <html lang="ar" dir="rtl">
@@ -113,6 +166,7 @@ td.act a{margin:2px;padding:4px 10px;font-size:13px;border-radius:6px;color:#fff
     <button id="go">ابدأ البحث</button>
     <button id="stop" class="sec" disabled>إيقاف</button>
     <button id="csv" class="sec" disabled>تحميل CSV</button>
+    <button id="out" class="sec">خروج</button>
   </div>
   <div class="bar" id="bar"><i></i></div>
   <div id="msg"></div><div id="err"></div>
@@ -156,7 +210,7 @@ function render(){
 ['q','fE','fW'].forEach(i=>$(i).addEventListener('input',render));
 function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none'}
 let stopFlag=false;
-async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d}
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const d=await r.json();if(r.status===401){location.reload();return}if(!r.ok)throw new Error(d.error||r.status);return d}
 async function pool(items,n,fn){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length&&!stopFlag){const x=items[i++];await fn(x)}}))}
 $('go').onclick=async()=>{
   $('err').textContent='';stopFlag=false;ROWS=[];render();busy(true);$('csv').disabled=true;
@@ -182,6 +236,7 @@ $('go').onclick=async()=>{
   }catch(e){$('err').textContent=e.message}
   busy(false);render();$('csv').disabled=!ROWS.length;
 };
+$('out').onclick=async()=>{await fetch('/api/logout',{method:'POST'});location.reload()};
 $('stop').onclick=()=>{stopFlag=true;$('msg').textContent='جاري الإيقاف...'};
 $('csv').onclick=()=>{
   const cols=Object.keys(ROWS[0]);
