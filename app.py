@@ -132,8 +132,7 @@ def save():
     """يدمج نتائج بحث جديدة مع المحفوظ دون أي تكرار."""
     incoming = (request.get_json(force=True) or {}).get("rows", [])
     try:
-        rows, added, added_src = store.save_add(incoming)
-        return jsonify(rows=rows, added=added, added_sources=added_src)
+        return jsonify(saved=store.save_add(incoming))
     except Exception as e:  # noqa: BLE001
         return jsonify(error="تعذر الحفظ: " + str(e)), 500
 
@@ -260,22 +259,25 @@ function render(){
 function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none'}
 let stopFlag=false;
 const LIMIT=120000,SEARCH_SHARE=0.6; // 2 دقيقة كحد أقصى للعملية كاملة
-async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});if(r.status===401){location.reload();return}const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d}
+async function post(u,b){let r;for(let k=0;;k++){try{r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});break}catch(e){if(k>=3)throw new Error('انقطع الاتصال بالخادم (Load failed). تأكد من الإنترنت وأعد المحاولة.');await new Promise(z=>setTimeout(z,1000*(k+1)))}}
+  if(r.status===401){location.reload();return}const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d}
 async function pool(items,n,fn,deadline,ok=()=>true){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length&&!stopFlag&&ok()&&Date.now()<deadline){await fn(items[i++])}}))}
 function plain(l){ // صف بدون زيارة الموقع (عند انتهاء الوقت)
   const mob=(l.phones||[]).find(p=>/^\+212[67]/.test(p));
   return {name:l.name,email:'',other_emails:'',whatsapp:mob||'',whatsapp_status:mob?'likely (mobile)':'',whatsapp_link:mob?'https://wa.me/'+mob.slice(1):'',phones:(l.phones||[]).join('; '),website:l.website,address:l.address,maps_url:l.maps_url||'',rating:l.rating,reviews:l.reviews,lat:l.lat,lon:l.lon,source:l.source}}
 let STORED=[],FRESH=new Set();
 const srcs=r=>String(r.source||'').split(';').map(s=>s.trim()).filter(Boolean);
+async function getLeads(){for(let k=0;;k++){try{const d=await (await fetch('/api/leads')).json();if(d.error)throw new Error(d.error);return d}catch(e){if(k>=3)throw e;await new Promise(z=>setTimeout(z,1500*(k+1)))}}}
 async function loadStored(){
-  try{const d=await (await fetch('/api/leads')).json();if(d.error)throw new Error(d.error);STORED=d.rows||[];ROWS=STORED;render();$('csv').disabled=!ROWS.length;
+  $('msg').textContent='جاري تحميل القائمة المحفوظة...';
+  try{const d=await getLeads();STORED=d.rows||[];ROWS=STORED;render();$('csv').disabled=!ROWS.length;
     $('msg').textContent=ROWS.length?`المحفوظ سابقاً: ${ROWS.length} رياض`:''}catch(e){$('err').textContent=e.message}
 }
 loadStored();
 $('go').onclick=async()=>{
   $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('csv').disabled=true;const buf=[];let addedTotal=0,flushing=Promise.resolve();const addedSrc=new Set();
-  const flush=(force)=>{if(!buf.length||(!force&&buf.length<15))return;const chunk=buf.splice(0);
-    flushing=flushing.then(async()=>{try{const s=await post('/api/save',{rows:chunk});addedTotal+=s.added;s.added_sources.forEach(x=>addedSrc.add(x))}catch(e){buf.unshift(...chunk)}})};
+  const flush=(force)=>{if(!buf.length||(!force&&buf.length<40))return;const chunk=buf.splice(0);
+    flushing=flushing.then(async()=>{try{await post('/api/save',{rows:chunk})}catch(e){buf.unshift(...chunk)}})};
   const KNOWN=new Set();STORED.forEach(r=>srcs(r).forEach(s=>KNOWN.add(s)));
   const t0=Date.now(),tick=setInterval(()=>{$('time').textContent=Math.min(120,Math.round((Date.now()-t0)/1000))+' / 120 ث'},500);
   try{
@@ -306,8 +308,8 @@ $('go').onclick=async()=>{
     $('msg').textContent='جاري الحفظ...';
     flush(true);await flushing;if(buf.length){flush(true);await flushing}
     if(buf.length)throw new Error('تعذّر حفظ '+buf.length+' رياض. لا تغلق الصفحة وأعد المحاولة.');
-    const all=await (await fetch('/api/leads')).json();
-    ROWS=STORED=all.rows||[];FRESH=new Set(addedSrc);const saved={added:addedTotal};
+    const before=STORED.length,all=await getLeads();
+    ROWS=STORED=all.rows||[];FRESH=new Set();ROWS.forEach(r=>srcs(r).forEach(s=>{if(!KNOWN.has(s))FRESH.add(s)}));const saved={added:Math.max(0,ROWS.length-before)};
     $('msg').textContent=(stopFlag?'تم الإيقاف':'انتهى')+`: أُضيف ${saved.added} رياض جديد، المجموع المحفوظ ${ROWS.length}`+(already?` (تخطّيت ${already} موجودة سابقاً)`:'')+(doCrawl&&left?` — ${left} لم يُفحص موقعها بسبب حد الوقت`:'');
     if(quota)$('err').textContent='توقف البحث: تجاوز مشروع Google حصته اليومية (SearchTextRequest per day). ارفع الحصة من Google Cloud ← APIs & Services ← Places API (New) ← Quotas، أو أعد المحاولة غداً. ما وُجد قبل التوقف تم حفظه.';
     else if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;

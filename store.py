@@ -27,6 +27,7 @@ STOP = {"riad", "riads", "ryad", "ryads", "riyad", "hotel", "spa", "marrakech", 
 # سجلّ إضافات فقط (append-only): كل حفظ = ملف جديد باسم فريد، لا كتابة فوق ملف قديم أبداً.
 # هذا يمنع ضياع البيانات عند حفظين متزامنين أو عند قراءة نسخة قديمة من الكاش.
 LOG_PREFIX = "log/"
+SNAP_PREFIX = "snap/"
 
 
 def _read_bytes(res):
@@ -50,6 +51,33 @@ def _apply(rows, op):
     return add_rows(rows, op.get("rows", []))[0]
 
 
+def _ts(name):
+    """الوقت (13 رقماً) من اسم ملف مثل log/1793889164165-ab12cd34.json"""
+    return name.rsplit("/", 1)[-1][:13]
+
+
+def _list(prefix):
+    from vercel.blob import sync as blob
+    return sorted(b.pathname for b in blob.query_blobs(prefix=prefix))
+
+
+def _base_rows():
+    """آخر لقطة (snap/) أو النسخة القديمة. يعيد (rows, cutoff)."""
+    snaps = _list(SNAP_PREFIX)
+    if snaps:
+        return _blob_json(snaps[-1]).get("rows", []), _ts(snaps[-1])
+    try:
+        return _blob_json(BLOB_PATH).get("rows", []), "0" * 13
+    except Exception as e:  # noqa: BLE001
+        if e.__class__.__name__ != "BlobNotFoundError":
+            raise
+        return [], "0" * 13
+
+
+def _sort(rows):
+    return sorted(rows, key=lambda r: (not r.get("email"), not r.get("whatsapp"), (r.get("name") or "").lower()))
+
+
 def load():
     if not USE_BLOB:
         try:
@@ -58,19 +86,34 @@ def load():
         except FileNotFoundError:
             return []
     from concurrent.futures import ThreadPoolExecutor
-    from vercel.blob import sync as blob
-    rows = []
-    try:  # النسخة القديمة (قبل نظام السجلّ) إن وُجدت
-        rows = _blob_json(BLOB_PATH).get("rows", [])
-    except Exception as e:  # noqa: BLE001
-        if e.__class__.__name__ != "BlobNotFoundError":
-            raise
-    names = sorted(b.pathname for b in blob.query_blobs(prefix=LOG_PREFIX))
+    rows, cutoff = _base_rows()
+    names = [n for n in _list(LOG_PREFIX) if _ts(n) >= cutoff]  # ما قبل اللقطة مدموج فيها
     with ThreadPoolExecutor(max_workers=16) as ex:
         ops = list(ex.map(_blob_json, names))
     for op in ops:  # بترتيب الزمن
         rows = _apply(rows, op)
-    return sorted(rows, key=lambda r: (not r.get("email"), not r.get("whatsapp"), (r.get("name") or "").lower()))
+    _maybe_compact(cutoff, names)
+    return _sort(rows)
+
+
+def _maybe_compact(cutoff, names):
+    """يدمج السجلات الأقدم من دقيقة في لقطة واحدة فتصير القراءة أسرع. لا يحذف شيئاً."""
+    if not USE_BLOB:
+        return
+    limit = f"{int((time.time() - 60) * 1000):013d}"
+    old = [n for n in names if _ts(n) < limit]
+    if len(old) < 8:
+        return
+    try:
+        from vercel.blob import sync as blob
+        rows, _ = _base_rows()
+        for op in (_blob_json(n) for n in old):
+            rows = _apply(rows, op)
+        blob.put_blob(f"{SNAP_PREFIX}{limit}-{uuid.uuid4().hex[:6]}.json",
+                      json.dumps({"rows": rows}, ensure_ascii=False).encode("utf-8"), access="private",
+                      content_type="application/json", add_random_suffix=False, allow_overwrite=False)
+    except Exception:  # noqa: BLE001
+        pass  # الضغط اختياري؛ لا يؤثر على القراءة
 
 
 def _append(op):
@@ -87,14 +130,12 @@ def _append(op):
 
 
 def save_add(incoming):
-    """يحفظ نتائج جديدة. يعيد (كل الصفوف، عدد المضاف، مصادر المضاف)."""
+    """يحفظ فقط (سريع، بلا قراءة). يعيد عدد الصفوف المحفوظة."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     incoming = [dict(r, added_at=r.get("added_at") or now) for r in incoming]
-    current = load()
-    rows, added, added_src = add_rows(current, incoming)
     if incoming:
         _append({"op": "add", "rows": incoming})
-    return rows, added, added_src
+    return len(incoming)
 
 
 def delete(sources):
