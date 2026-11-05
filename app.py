@@ -121,6 +121,18 @@ def save():
         return jsonify(error="تعذر الحفظ: " + str(e)), 500
 
 
+@app.post("/api/delete")
+def delete():
+    """يحذف رياضاً من القاعدة بمعرّف المصدر (source)."""
+    gone = {str(s) for s in (request.get_json(force=True) or {}).get("sources", [])}
+    try:
+        rows = [r for r in store.load() if not (store.sources_of(r) & gone)]
+        store.save(rows)
+        return jsonify(rows=rows)
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=str(e)), 500
+
+
 @app.get("/")
 def index():
     return PAGE if authed() else LOGIN
