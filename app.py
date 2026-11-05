@@ -169,7 +169,7 @@ td.act a{margin:2px;padding:4px 10px;font-size:13px;border-radius:6px;color:#fff
     <button id="out" class="sec">خروج</button>
   </div>
   <div class="bar" id="bar"><i></i></div>
-  <div id="msg"></div><div id="err"></div>
+  <div id="msg"></div><div id="time" class="tag"></div><div id="err"></div>
 </div>
 
 <div class="card stats">
@@ -210,31 +210,38 @@ function render(){
 ['q','fE','fW'].forEach(i=>$(i).addEventListener('input',render));
 function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none'}
 let stopFlag=false;
-async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const d=await r.json();if(r.status===401){location.reload();return}if(!r.ok)throw new Error(d.error||r.status);return d}
-async function pool(items,n,fn){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length&&!stopFlag){const x=items[i++];await fn(x)}}))}
+const LIMIT=120000,SEARCH_SHARE=0.6; // 2 دقيقة كحد أقصى للعملية كاملة
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});if(r.status===401){location.reload();return}const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d}
+async function pool(items,n,fn,deadline){let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length&&!stopFlag&&Date.now()<deadline){await fn(items[i++])}}))}
+function plain(l){ // صف بدون زيارة الموقع (عند انتهاء الوقت)
+  const mob=(l.phones||[]).find(p=>/^\+212[67]/.test(p));
+  return {name:l.name,email:'',other_emails:'',whatsapp:mob||'',whatsapp_status:mob?'likely (mobile)':'',whatsapp_link:mob?'https://wa.me/'+mob.slice(1):'',phones:(l.phones||[]).join('; '),website:l.website,address:l.address,maps_url:l.maps_url||'',rating:l.rating,reviews:l.reviews,lat:l.lat,lon:l.lon,source:l.source}}
 $('go').onclick=async()=>{
   $('err').textContent='';stopFlag=false;ROWS=[];render();busy(true);$('csv').disabled=true;
+  const t0=Date.now(),tick=setInterval(()=>{$('time').textContent=Math.min(120,Math.round((Date.now()-t0)/1000))+' / 120 ث'},500);
   try{
     const plan=await (await fetch('/api/plan')).json();
     if(!plan.configured)throw new Error('API key غير مضبوط على الخادم');
     const tasks=[];for(let q=0;q<plan.queries;q++)for(let c=0;c<plan.cells;c++)tasks.push({q,cell:c});
     const found=new Map();let done=0,failed=0,lastErr='';
-    await pool(tasks,4,async t=>{
+    await pool(tasks,8,async t=>{
       try{(await post('/api/search',t)).leads.forEach(l=>found.set(l.source,l))}catch(e){failed++;lastErr=e.message}
       done++;$('msg').textContent=`بحث Google Maps ${done}/${tasks.length} - وُجد ${found.size} رياض`;
-    });
-    if(failed===tasks.length)throw new Error(lastErr);
-    const leads=[...found.values()],doCrawl=$('crawl').checked;let n=0;
-    await pool(leads,6,async l=>{
-      try{ROWS.push((await post('/api/enrich',doCrawl?l:{...l,website:''})).row)}catch(e){}
-      n++;$('msg').textContent=`استخراج الإيميل والواتساب ${n}/${leads.length}`;
+    },t0+LIMIT*SEARCH_SHARE);
+    if(done&&failed===done)throw new Error(lastErr);
+    const leads=[...found.values()],doCrawl=$('crawl').checked,seen=new Set();let n=0;
+    if(doCrawl)await pool(leads,12,async l=>{
+      try{ROWS.push((await post('/api/enrich',l)).row);seen.add(l.source)}catch(e){}
+      n++;$('msg').textContent=`استخراج الإيميل والواتساب ${n}/${leads.length} - ${ROWS.length} رياض`;
       if(n%5===0)render();
-    });
+    },t0+LIMIT);
+    leads.filter(l=>!seen.has(l.source)).forEach(l=>ROWS.push(plain(l))); // ما لم يلحق الوقت بزيارته
     ROWS.sort((a,b)=>(!a.email)-(!b.email)||(!a.whatsapp)-(!b.whatsapp)||a.name.localeCompare(b.name));
-    $('msg').textContent=stopFlag?'تم الإيقاف':`انتهى: ${ROWS.length} رياض`;
+    const left=leads.length-seen.size;
+    $('msg').textContent=(stopFlag?'تم الإيقاف':'انتهى')+`: ${ROWS.length} رياض`+(doCrawl&&left?` (${left} منها لم يُفحص موقعها بسبب حد الوقت)`:'');
     if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;
   }catch(e){$('err').textContent=e.message}
-  busy(false);render();$('csv').disabled=!ROWS.length;
+  clearInterval(tick);busy(false);render();$('csv').disabled=!ROWS.length;
 };
 $('out').onclick=async()=>{await fetch('/api/logout',{method:'POST'});location.reload()};
 $('stop').onclick=()=>{stopFlag=true;$('msg').textContent='جاري الإيقاف...'};

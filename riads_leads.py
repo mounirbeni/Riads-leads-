@@ -102,9 +102,16 @@ FIELD_MASK = ",".join([
     "places.googleMapsUri", "places.rating", "places.userRatingCount", "places.types",
     "places.businessStatus", "nextPageToken",
 ])
-QUERIES = ["riad", "riads", "riads in Marrakesh", "riads in Marrakech"]
-GRID = 4  # GRID x GRID خلايا فوق مراكش لتجاوز حد 60 نتيجة لكل بحث
-RIAD_NAME = re.compile(r"riad|ryad|riyad|ryads|رياض", re.I)
+QUERIES = [  # مرتبة بالأولوية: الأهم أولاً (البحث محدود بـ 2 دقيقة)
+    "riad", "riads in Marrakech", "riads in Marrakesh", "riads",
+    "ryad", "riyad", "riad medina Marrakech", "boutique riad Marrakech",
+    "riad hotel", "riad spa", "luxury riad", "traditional riad",
+    "maison d'hôtes Marrakech", "dar guest house Marrakech", "رياض مراكش",
+]
+GRID = 6  # GRID x GRID خلايا فوق مراكش لتجاوز حد 60 نتيجة لكل بحث
+RIAD_NAME = re.compile(r"riad|ryad|riyad|رياض", re.I)
+DAR_NAME = re.compile(r"(^|\s)(dar|دار)[\s\-]", re.I)
+LODGING = {"lodging", "guest_house", "bed_and_breakfast", "hotel", "inn", "resort_hotel", "hostel"}
 
 
 def grid_cells(n=GRID):
@@ -159,8 +166,9 @@ def place_to_lead(p):
         return None  # Marrakech فقط
     if p.get("businessStatus") == "CLOSED_PERMANENTLY":
         return None
-    if not RIAD_NAME.search(name):
-        return None  # riads فقط (لا فنادق ولا مطاعم)
+    is_lodging = bool(LODGING & set(p.get("types") or []))
+    if not (RIAD_NAME.search(name) or (DAR_NAME.search(name) and is_lodging)):
+        return None  # riads / dars فقط (لا فنادق عادية ولا مطاعم)
     phones = []
     for key in ("internationalPhoneNumber", "nationalPhoneNumber"):
         n = normalize_ma_phone(p.get(key, ""))
