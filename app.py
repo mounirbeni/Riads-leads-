@@ -15,7 +15,10 @@ from urllib.parse import urlparse
 from flask import Flask, jsonify, make_response, request
 
 import riads_leads as core
+import base64
+
 import store
+from icons import ICONS
 
 app = Flask(__name__)
 KEYS = [k.strip() for name in ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_API_KEY_2", "GOOGLE_MAPS_API_KEYS")
@@ -119,6 +122,52 @@ def enrich():
     return jsonify(row=core.finalize(lead))
 
 
+MANIFEST = {
+    "name": "Riads Leads - مراكش", "short_name": "Riads", "description": "رياضات مراكش: إيميلات وواتساب",
+    "start_url": "/", "scope": "/", "display": "standalone", "orientation": "portrait",
+    "lang": "ar", "dir": "rtl", "background_color": "#b4532a", "theme_color": "#b4532a",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+    ],
+}
+SW = """self.addEventListener('install',e=>self.skipWaiting());
+self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch',e=>{});  // بدون كاش: البيانات دائماً من الخادم
+"""
+
+
+@app.get("/manifest.webmanifest")
+def manifest():
+    resp = jsonify(MANIFEST)
+    resp.headers["Content-Type"] = "application/manifest+json"
+    return resp
+
+
+@app.get("/sw.js")
+def sw():
+    return SW, 200, {"Content-Type": "application/javascript", "Cache-Control": "no-cache", "Service-Worker-Allowed": "/"}
+
+
+def _icon(key):
+    return base64.b64decode(ICONS[key]), 200, {"Content-Type": "image/png", "Cache-Control": "public, max-age=86400"}
+
+
+@app.get("/icon-192.png")
+def icon192():
+    return _icon("192")
+
+
+@app.get("/icon-512.png")
+def icon512():
+    return _icon("512")
+
+
+@app.get("/apple-touch-icon.png")
+def apple_icon():
+    return _icon("180")
+
+
 @app.get("/api/leads")
 def leads():
     try:
@@ -153,8 +202,10 @@ def index():
 
 
 LOGIN = r"""<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Riads Leads - دخول</title>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Riads Leads</title>
+<meta name="theme-color" content="#b4532a"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
 :root{--bg:#faf6f0;--card:#fff;--ink:#2b2118;--pri:#b4532a;--line:#eadfce}
 @media(prefers-color-scheme:dark){:root{--bg:#1c1713;--card:#272019;--ink:#f3e9dc;--line:#3a3026}}
@@ -176,87 +227,163 @@ PAGE = r"""<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Riads Leads - مراكش</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Riads Leads</title>
+<meta name="theme-color" content="#b4532a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Riads">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/icon-192.png">
 <style>
-:root{--bg:#faf6f0;--card:#fff;--ink:#2b2118;--mut:#7a6a5a;--pri:#b4532a;--ok:#1f9d55;--line:#eadfce}
-@media(prefers-color-scheme:dark){:root{--bg:#1c1713;--card:#272019;--ink:#f3e9dc;--mut:#b5a493;--line:#3a3026}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,"Segoe UI",Tahoma,sans-serif}
-.wrap{max-width:1200px;margin:0 auto;padding:16px}
-h1{margin:8px 0 2px}p.sub{color:var(--mut);margin:0 0 16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-input[type=text],input[type=password],input[type=search]{flex:1;min-width:220px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font-size:15px}
-button,.btn{background:var(--pri);color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block}
-button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
-button:disabled{opacity:.5;cursor:default}
-.wa{background:#25d366}.mail{background:#2563eb}
-#msg{color:var(--mut);margin-top:10px}#err{color:#c0392b;margin-top:10px;white-space:pre-wrap}
-.stats{display:flex;gap:12px;flex-wrap:wrap}.stat{flex:1;min-width:120px;text-align:center}.stat b{display:block;font-size:26px;color:var(--pri)}
-.tablewrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{padding:8px;border-bottom:1px solid var(--line);text-align:start;vertical-align:top}th{position:sticky;top:0;background:var(--card)}
-td.act a{margin:2px;padding:4px 10px;font-size:13px;border-radius:6px;color:#fff;text-decoration:none;display:inline-block}
-.tag{font-size:11px;color:var(--mut)}label{display:flex;gap:6px;align-items:center}
-.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:10px;display:none}.bar i{display:block;height:100%;width:40%;background:var(--pri);animation:m 1.2s infinite}
-@keyframes m{0%{margin-inline-start:-40%}100%{margin-inline-start:100%}}
+:root{--bg:#f6f0e8;--card:#fff;--ink:#2b2118;--mut:#85766a;--pri:#b4532a;--pri2:#c4623a;--ok:#1f9d55;--line:#eadfce;--chip:#efe6da;--sat:env(safe-area-inset-top);--sab:env(safe-area-inset-bottom)}
+@media(prefers-color-scheme:dark){:root{--bg:#161210;--card:#231d18;--ink:#f3e9dc;--mut:#a8998b;--line:#352c24;--chip:#2e251e}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:-apple-system,system-ui,"Segoe UI",Tahoma,sans-serif;font-size:16px;overscroll-behavior:none;-webkit-user-select:none;user-select:none}
+input,button{font:inherit}
+#app{display:flex;flex-direction:column;height:100%;max-width:640px;margin:0 auto}
+.top{padding:calc(var(--sat) + 10px) 16px 12px;background:linear-gradient(160deg,var(--pri2),var(--pri));color:#fff;border-radius:0 0 22px 22px;box-shadow:0 4px 16px rgba(120,50,20,.25);flex:none}
+.top .row1{display:flex;align-items:center;justify-content:space-between}
+.top h1{margin:0;font-size:22px;font-weight:700;letter-spacing:.2px}.top h1 small{font-weight:400;opacity:.85;font-size:14px;margin-inline-start:6px}
+.icon-btn{background:rgba(255,255,255,.18);border:0;color:#fff;width:40px;height:40px;border-radius:50%;font-size:20px;display:grid;place-items:center}
+.icon-btn:active{background:rgba(255,255,255,.3)}
+.stats{display:flex;gap:8px;margin-top:12px}
+.stat{flex:1;background:rgba(255,255,255,.16);border-radius:14px;padding:8px 6px;text-align:center;font-size:12px;opacity:.95}
+.stat b{display:block;font-size:20px;line-height:1.2}
+main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px calc(88px + var(--sab))}
+.tab{display:none}.tab.on{display:block}
+.search{position:sticky;top:-14px;z-index:5;background:var(--bg);padding:6px 0 10px}
+.search input{width:100%;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:14px;padding:13px 16px;font-size:16px;outline:0}
+.chips{display:flex;gap:8px;margin-top:10px;overflow-x:auto}
+.chip{flex:none;border:0;background:var(--chip);color:var(--ink);border-radius:20px;padding:8px 16px;font-size:14px}
+.chip.on{background:var(--pri);color:#fff}
+.rc{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.rc h3{margin:0 0 4px;font-size:16px;line-height:1.35;user-select:text;-webkit-user-select:text}
+.new{display:inline-block;background:var(--ok);color:#fff;border-radius:8px;font-size:11px;padding:1px 7px;margin-inline-start:6px;vertical-align:middle}
+.addr{color:var(--mut);font-size:13px;margin-bottom:8px}
+.meta{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin-bottom:10px;user-select:text;-webkit-user-select:text}
+.meta span{color:var(--mut)}.meta b{color:var(--ink);font-weight:600;direction:ltr;unicode-bidi:embed}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.acts a{flex:1;min-width:84px;text-align:center;text-decoration:none;color:#fff;padding:11px 8px;border-radius:12px;font-size:14px;font-weight:600}
+.acts a:active{opacity:.75}
+.a-wa{background:#25d366}.a-mail{background:#2f6fed}.a-tel{background:#6b7280}.a-map{background:#e0793c}.a-web{background:#7c5cd6}
+.empty{text-align:center;color:var(--mut);padding:60px 20px;line-height:1.8}
+.more{width:100%;border:1px dashed var(--line);background:transparent;color:var(--mut);border-radius:14px;padding:13px;margin:4px 0 12px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:14px}
+.panel h2{margin:0 0 10px;font-size:17px}
+.sw{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:15px}
+.sw:last-of-type{border-bottom:0}.sw small{display:block;color:var(--mut);font-size:12px;margin-top:2px}
+.sw input{appearance:none;-webkit-appearance:none;flex:none;width:50px;height:30px;border-radius:15px;background:var(--chip);position:relative;transition:.2s;border:0}
+.sw input::after{content:"";position:absolute;top:3px;inset-inline-start:3px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:.2s}
+.sw input:checked{background:var(--ok)}.sw input:checked::after{inset-inline-start:23px}
+.btn{width:100%;border:0;border-radius:16px;padding:16px;font-size:17px;font-weight:700;color:#fff;background:var(--pri);box-shadow:0 4px 12px rgba(180,83,42,.3)}
+.btn:active{transform:scale(.985)}.btn:disabled{opacity:.45;box-shadow:none}
+.btn.sec{background:var(--chip);color:var(--ink);box-shadow:none;font-weight:600;font-size:15px;padding:14px}
+.btn.red{background:#d64545}
+.gap{height:10px}
+.bar{height:8px;background:var(--chip);border-radius:4px;overflow:hidden;margin:14px 0 6px;display:none}
+.bar i{display:block;height:100%;width:35%;background:var(--pri);border-radius:4px;animation:m 1.1s infinite ease-in-out}
+@keyframes m{0%{margin-inline-start:-35%}100%{margin-inline-start:100%}}
+#msg{color:var(--ink);font-size:14px;line-height:1.6;min-height:20px;user-select:text;-webkit-user-select:text}
+#time{color:var(--mut);font-size:12px;direction:ltr;text-align:center}
+#err{color:#d64545;font-size:14px;line-height:1.6;margin-top:8px;white-space:pre-wrap;user-select:text;-webkit-user-select:text}
+.hint{color:var(--mut);font-size:13px;line-height:1.8}
+nav{position:fixed;bottom:0;left:0;right:0;max-width:640px;margin:0 auto;display:flex;background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--line);padding:6px 6px calc(6px + var(--sab));z-index:10}
+nav button{flex:1;border:0;background:transparent;color:var(--mut);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px;padding:6px 0;border-radius:12px}
+nav button .ic{font-size:23px;line-height:1.1}
+nav button.on{color:var(--pri);font-weight:700}
 </style>
 </head>
-<body><div class="wrap">
-<h1>🏯 Riads Leads — مراكش</h1>
-<p class="sub">كل الـ riads في مراكش فقط من Google Maps، مع الإيميلات والواتساب.</p>
-
-<div class="card">
-  <div class="row">
-    <label><input type="checkbox" id="crawl" checked> استخراج الإيميل/الواتساب من مواقعهم</label>
-    <label><input type="checkbox" id="wide"> بحث موسّع (يستهلك أكثر من حصة Google)</label>
+<body>
+<div id="app">
+  <div class="top">
+    <div class="row1"><h1>🏯 Riads<small>مراكش</small></h1><button class="icon-btn" id="refresh" aria-label="تحديث">⟳</button></div>
+    <div class="stats">
+      <div class="stat"><b id="sN">0</b>riads</div>
+      <div class="stat"><b id="sE">0</b>بإيميل</div>
+      <div class="stat"><b id="sW">0</b>بواتساب</div>
+    </div>
   </div>
-  <div class="row" style="margin-top:10px">
-    <button id="go">ابدأ البحث</button>
-    <button id="stop" class="sec" disabled>إيقاف</button>
-    <button id="csv" class="sec" disabled>تحميل CSV</button>
-    <button id="out" class="sec">خروج</button>
-  </div>
-  <div class="bar" id="bar"><i></i></div>
-  <div id="msg"></div><div id="time" class="tag"></div><div id="err"></div>
-</div>
 
-<div class="card stats">
-  <div class="stat"><b id="sN">0</b>riads</div>
-  <div class="stat"><b id="sE">0</b>بإيميل</div>
-  <div class="stat"><b id="sW">0</b>بواتساب</div>
-</div>
+  <main>
+    <section class="tab on" id="tab-list">
+      <div class="search">
+        <input type="search" id="q" placeholder="🔎 ابحث بالاسم أو الإيميل أو الرقم" autocomplete="off">
+        <div class="chips">
+          <button class="chip on" id="cAll">الكل</button>
+          <button class="chip" id="cE">✉️ بإيميل</button>
+          <button class="chip" id="cW">💬 بواتساب</button>
+        </div>
+        <input type="checkbox" id="fE" hidden><input type="checkbox" id="fW" hidden>
+      </div>
+      <div id="list"></div>
+    </section>
 
-<div class="card">
-  <div class="row" style="margin-bottom:10px">
-    <input type="search" id="q" placeholder="ابحث في النتائج...">
-    <label><input type="checkbox" id="fE"> فقط بإيميل</label>
-    <label><input type="checkbox" id="fW"> فقط بواتساب</label>
-  </div>
-  <div class="tablewrap"><table>
-    <thead><tr><th>#</th><th>الاسم</th><th>الإيميل</th><th>واتساب</th><th>الهاتف</th><th>الموقع</th><th>تواصل</th></tr></thead>
-    <tbody id="tb"><tr><td colspan="7" style="color:var(--mut)">لا توجد نتائج بعد.</td></tr></tbody>
-  </table></div>
-</div>
+    <section class="tab" id="tab-search">
+      <div class="panel">
+        <h2>بحث جديد في مراكش</h2>
+        <label class="sw"><span>استخراج الإيميل والواتساب<small>يزور موقع كل رياض جديد</small></span><input type="checkbox" id="crawl" checked></label>
+        <label class="sw"><span>بحث موسّع<small>نتائج أكثر لكن يستهلك حصة Google أكثر</small></span><input type="checkbox" id="wide"></label>
+      </div>
+      <button class="btn" id="go">ابدأ البحث</button>
+      <div class="gap"></div>
+      <button class="btn sec red" id="stop" disabled style="color:#fff">إيقاف</button>
+      <div class="bar" id="bar"><i></i></div>
+      <div id="time"></div>
+      <div id="msg"></div>
+      <div id="err"></div>
+    </section>
+
+    <section class="tab" id="tab-more">
+      <div class="panel">
+        <h2>تصدير</h2>
+        <button class="btn sec" id="csv" disabled>⬇️ تحميل القائمة (CSV)</button>
+        <p class="hint">على الآيفون يفتح القائمة للمشاركة: اختر «حفظ في الملفات».</p>
+      </div>
+      <div class="panel">
+        <h2>تثبيت التطبيق</h2>
+        <p class="hint"><b>آيفون:</b> زر المشاركة ثم «إضافة إلى الشاشة الرئيسية».<br><b>أندرويد:</b> قائمة المتصفح ثم «تثبيت التطبيق».</p>
+      </div>
+      <div class="panel"><button class="btn sec" id="out">تسجيل الخروج</button></div>
+    </section>
+  </main>
+
+  <nav>
+    <button class="on" data-tab="list"><span class="ic">📋</span>القائمة</button>
+    <button data-tab="search"><span class="ic">🔍</span>بحث</button>
+    <button data-tab="more"><span class="ic">⚙️</span>المزيد</button>
+  </nav>
 </div>
 <script>
-const $=id=>document.getElementById(id);let ROWS=[];
+const $=id=>document.getElementById(id);let ROWS=[],SHOW=40;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function showTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+n));document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===n));$('app').querySelector('main').scrollTop=0}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
+function setChips(){$('cAll').classList.toggle('on',!$('fE').checked&&!$('fW').checked);$('cE').classList.toggle('on',$('fE').checked);$('cW').classList.toggle('on',$('fW').checked);SHOW=40;render()}
+$('cAll').onclick=()=>{$('fE').checked=$('fW').checked=false;setChips()};
+$('cE').onclick=()=>{$('fE').checked=!$('fE').checked;setChips()};
+$('cW').onclick=()=>{$('fW').checked=!$('fW').checked;setChips()};
+$('q').addEventListener('input',()=>{SHOW=40;render()});
 function render(){
-  const q=$('q').value.toLowerCase(),fe=$('fE').checked,fw=$('fW').checked;
-  const list=ROWS.filter(r=>(!fe||r.email)&&(!fw||r.whatsapp)&&(!q||JSON.stringify(r).toLowerCase().includes(q)));
+  const q=$('q').value.toLowerCase().trim(),fe=$('fE').checked,fw=$('fW').checked;
+  const list=ROWS.filter(r=>(!fe||r.email)&&(!fw||r.whatsapp)&&(!q||[r.name,r.email,r.other_emails,r.phones,r.whatsapp,r.address,r.website].join(' ').toLowerCase().includes(q)));
   $('sN').textContent=ROWS.length;$('sE').textContent=ROWS.filter(r=>r.email).length;$('sW').textContent=ROWS.filter(r=>r.whatsapp).length;
-  $('tb').innerHTML=list.length?list.map((r,i)=>`<tr>
-    <td>${i+1}</td>
-    <td><b>${esc(r.name)}</b>${srcs(r).some(s=>FRESH.has(s))?' <span class="tag" style="color:var(--ok)">● جديد</span>':''}<div class="tag">${esc(r.address)}</div>${r.rating?`<div class="tag">⭐ ${esc(r.rating)} (${esc(r.reviews)})</div>`:''}</td>
-    <td>${esc(r.email)}<div class="tag">${esc(r.other_emails)}</div></td>
-    <td dir="ltr">${esc(r.whatsapp)}<div class="tag">${esc(r.whatsapp_status)}</div></td>
-    <td dir="ltr">${esc(r.phones)}</td>
-    <td>${r.website?`<a href="${esc(r.website)}" target="_blank" rel="noopener">موقع</a>`:''} ${r.maps_url?`<a href="${esc(r.maps_url)}" target="_blank" rel="noopener">Maps</a>`:''}</td>
-    <td class="act">${r.whatsapp_link?`<a class="wa" href="${esc(r.whatsapp_link)}" target="_blank" rel="noopener">واتساب</a>`:''}${r.email?`<a class="mail" href="mailto:${esc(r.email)}">إيميل</a>`:''}</td></tr>`).join('')
-  :'<tr><td colspan="7" style="color:var(--mut)">لا توجد نتائج.</td></tr>';
+  if(!list.length){$('list').innerHTML=`<div class="empty">${ROWS.length?'لا توجد نتائج مطابقة.':'لا توجد رياضات محفوظة بعد.<br>افتح تبويب «بحث» وابدأ.'}</div>`;return}
+  $('list').innerHTML=list.slice(0,SHOW).map(r=>{
+    const tel=String(r.phones||'').split(';')[0].trim();
+    return `<article class="rc"><h3>${esc(r.name)}${srcs(r).some(s=>FRESH.has(s))?'<span class="new">جديد</span>':''}</h3>
+    <div class="addr">${esc(r.address)}</div>
+    <div class="meta">${r.rating?`<span>⭐ <b>${esc(r.rating)}</b> (${esc(r.reviews)})</span>`:''}${r.email?`<span>✉️ <b>${esc(r.email)}</b></span>`:''}${r.whatsapp?`<span>💬 <b>${esc(r.whatsapp)}</b>${r.whatsapp_status&&r.whatsapp_status!=='confirmed'?' <small>(محتمل)</small>':''}</span>`:''}${tel&&tel!==r.whatsapp?`<span>📞 <b>${esc(tel)}</b></span>`:''}</div>
+    <div class="acts">${r.whatsapp_link?`<a class="a-wa" href="${esc(r.whatsapp_link)}" target="_blank" rel="noopener">واتساب</a>`:''}${r.email?`<a class="a-mail" href="mailto:${esc(r.email)}">إيميل</a>`:''}${tel?`<a class="a-tel" href="tel:${esc(tel)}">اتصال</a>`:''}${r.maps_url?`<a class="a-map" href="${esc(r.maps_url)}" target="_blank" rel="noopener">الخريطة</a>`:''}${r.website?`<a class="a-web" href="${esc(r.website)}" target="_blank" rel="noopener">الموقع</a>`:''}</div></article>`}).join('')
+   +(list.length>SHOW?`<button class="more" id="more">عرض المزيد (${list.length-SHOW})</button>`:'');
+  const m=$('more');if(m)m.onclick=()=>{SHOW+=40;render()};
 }
-['q','fE','fW'].forEach(i=>$(i).addEventListener('input',render));
-function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none'}
+function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none';$('go').textContent=b?'جاري البحث...':'ابدأ البحث'}
+$('refresh').onclick=()=>{$('refresh').style.opacity=.5;loadStored().finally(()=>$('refresh').style.opacity=1)};
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 let stopFlag=false;
 const LIMIT=120000,SEARCH_SHARE=0.6; // 2 دقيقة كحد أقصى للعملية كاملة
 async function post(u,b){let r;for(let k=0;;k++){try{r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});break}catch(e){if(k>=3)throw new Error('انقطع الاتصال بالخادم (Load failed). تأكد من الإنترنت وأعد المحاولة.');await new Promise(z=>setTimeout(z,1000*(k+1)))}}
@@ -321,7 +448,9 @@ $('stop').onclick=()=>{stopFlag=true;$('msg').textContent='جاري الإيقا
 $('csv').onclick=()=>{
   const cols=Object.keys(ROWS[0]);
   const csv='﻿'+[cols.join(',')].concat(ROWS.map(r=>cols.map(c=>'"'+String(r[c]??'').replace(/"/g,'""')+'"').join(','))).join('\n');
-  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download='riads_marrakech.csv';a.click();
+  const file=new File([csv],'riads_marrakech.csv',{type:'text/csv'});
+  if(navigator.canShare&&navigator.canShare({files:[file]})){navigator.share({files:[file],title:'Riads Marrakech'}).catch(()=>{});return}
+  const a=document.createElement('a');a.href=URL.createObjectURL(file);a.download='riads_marrakech.csv';a.click();
 };
 </script></body></html>"""
 
