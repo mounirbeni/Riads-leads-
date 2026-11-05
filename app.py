@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from flask import Flask, jsonify, make_response, request
 
 import riads_leads as core
+import store
 
 app = Flask(__name__)
 KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
@@ -98,6 +99,26 @@ def enrich():
         except Exception:  # noqa: BLE001
             pass
     return jsonify(row=core.finalize(lead))
+
+
+@app.get("/api/leads")
+def leads():
+    try:
+        return jsonify(rows=store.load())
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error="تعذر قراءة قاعدة البيانات: " + str(e)), 500
+
+
+@app.post("/api/save")
+def save():
+    """يدمج نتائج بحث جديدة مع المحفوظ دون أي تكرار."""
+    incoming = (request.get_json(force=True) or {}).get("rows", [])
+    try:
+        rows, added, added_src = store.add_rows(store.load(), incoming)
+        store.save(rows)
+        return jsonify(rows=rows, added=added, added_sources=added_src)
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error="تعذر الحفظ: " + str(e)), 500
 
 
 @app.get("/")
@@ -199,7 +220,7 @@ function render(){
   $('sN').textContent=ROWS.length;$('sE').textContent=ROWS.filter(r=>r.email).length;$('sW').textContent=ROWS.filter(r=>r.whatsapp).length;
   $('tb').innerHTML=list.length?list.map((r,i)=>`<tr>
     <td>${i+1}</td>
-    <td><b>${esc(r.name)}</b><div class="tag">${esc(r.address)}</div>${r.rating?`<div class="tag">⭐ ${esc(r.rating)} (${esc(r.reviews)})</div>`:''}</td>
+    <td><b>${esc(r.name)}</b>${srcs(r).some(s=>FRESH.has(s))?' <span class="tag" style="color:var(--ok)">● جديد</span>':''}<div class="tag">${esc(r.address)}</div>${r.rating?`<div class="tag">⭐ ${esc(r.rating)} (${esc(r.reviews)})</div>`:''}</td>
     <td>${esc(r.email)}<div class="tag">${esc(r.other_emails)}</div></td>
     <td dir="ltr">${esc(r.whatsapp)}<div class="tag">${esc(r.whatsapp_status)}</div></td>
     <td dir="ltr">${esc(r.phones)}</td>
@@ -216,8 +237,16 @@ async function pool(items,n,fn,deadline){let i=0;await Promise.all(Array.from({l
 function plain(l){ // صف بدون زيارة الموقع (عند انتهاء الوقت)
   const mob=(l.phones||[]).find(p=>/^\+212[67]/.test(p));
   return {name:l.name,email:'',other_emails:'',whatsapp:mob||'',whatsapp_status:mob?'likely (mobile)':'',whatsapp_link:mob?'https://wa.me/'+mob.slice(1):'',phones:(l.phones||[]).join('; '),website:l.website,address:l.address,maps_url:l.maps_url||'',rating:l.rating,reviews:l.reviews,lat:l.lat,lon:l.lon,source:l.source}}
+let STORED=[],FRESH=new Set();
+const srcs=r=>String(r.source||'').split(';').map(s=>s.trim()).filter(Boolean);
+async function loadStored(){
+  try{const d=await (await fetch('/api/leads')).json();if(d.error)throw new Error(d.error);STORED=d.rows||[];ROWS=STORED;render();$('csv').disabled=!ROWS.length;
+    $('msg').textContent=ROWS.length?`المحفوظ سابقاً: ${ROWS.length} رياض`:''}catch(e){$('err').textContent=e.message}
+}
+loadStored();
 $('go').onclick=async()=>{
-  $('err').textContent='';stopFlag=false;ROWS=[];render();busy(true);$('csv').disabled=true;
+  $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('csv').disabled=true;const NEW=[];
+  const KNOWN=new Set();STORED.forEach(r=>srcs(r).forEach(s=>KNOWN.add(s)));
   const t0=Date.now(),tick=setInterval(()=>{$('time').textContent=Math.min(120,Math.round((Date.now()-t0)/1000))+' / 120 ث'},500);
   try{
     const plan=await (await fetch('/api/plan')).json();
@@ -229,16 +258,18 @@ $('go').onclick=async()=>{
       done++;$('msg').textContent=`بحث Google Maps ${done}/${tasks.length} - وُجد ${found.size} رياض`;
     },t0+LIMIT*SEARCH_SHARE);
     if(done&&failed===done)throw new Error(lastErr);
-    const leads=[...found.values()],doCrawl=$('crawl').checked,seen=new Set();let n=0;
+    const leads=[...found.values()].filter(l=>!KNOWN.has(l.source)),doCrawl=$('crawl').checked,seen=new Set();let n=0;
+    const already=found.size-leads.length;
     if(doCrawl)await pool(leads,12,async l=>{
-      try{ROWS.push((await post('/api/enrich',l)).row);seen.add(l.source)}catch(e){}
-      n++;$('msg').textContent=`استخراج الإيميل والواتساب ${n}/${leads.length} - ${ROWS.length} رياض`;
-      if(n%5===0)render();
+      try{NEW.push((await post('/api/enrich',l)).row);seen.add(l.source)}catch(e){}
+      n++;$('msg').textContent=`رياضات جديدة: استخراج الإيميل والواتساب ${n}/${leads.length}`;
     },t0+LIMIT);
-    leads.filter(l=>!seen.has(l.source)).forEach(l=>ROWS.push(plain(l))); // ما لم يلحق الوقت بزيارته
-    ROWS.sort((a,b)=>(!a.email)-(!b.email)||(!a.whatsapp)-(!b.whatsapp)||a.name.localeCompare(b.name));
+    leads.filter(l=>!seen.has(l.source)).forEach(l=>NEW.push(plain(l))); // ما لم يلحق الوقت بزيارته
     const left=leads.length-seen.size;
-    $('msg').textContent=(stopFlag?'تم الإيقاف':'انتهى')+`: ${ROWS.length} رياض`+(doCrawl&&left?` (${left} منها لم يُفحص موقعها بسبب حد الوقت)`:'');
+    $('msg').textContent='جاري الحفظ...';
+    const saved=await post('/api/save',{rows:NEW});
+    ROWS=STORED=saved.rows;FRESH=new Set(saved.added_sources);
+    $('msg').textContent=(stopFlag?'تم الإيقاف':'انتهى')+`: أُضيف ${saved.added} رياض جديد، المجموع المحفوظ ${ROWS.length}`+(already?` (تخطّيت ${already} موجودة سابقاً)`:'')+(doCrawl&&left?` — ${left} لم يُفحص موقعها بسبب حد الوقت`:'');
     if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;
   }catch(e){$('err').textContent=e.message}
   clearInterval(tick);busy(false);render();$('csv').disabled=!ROWS.length;
