@@ -5,6 +5,7 @@
     python3 app.py            ->  http://localhost:5000
 """
 import hashlib
+import re
 import hmac
 import ipaddress
 import os
@@ -12,6 +13,7 @@ import socket
 import time
 from urllib.parse import urlparse
 
+import requests
 from flask import Flask, jsonify, make_response, request
 
 import riads_leads as core
@@ -186,6 +188,36 @@ def last_run():
     return jsonify(run=store.last_run())
 
 
+_KEYS_CACHE = {"at": 0, "data": []}
+
+
+def _check_key(key):
+    try:
+        r = requests.post(core.PLACES_URL, json={"textQuery": "riad", "pageSize": 1}, timeout=15,
+                          headers={"X-Goog-Api-Key": key, "X-Goog-FieldMask": "places.id", "Content-Type": "application/json"})
+        if r.status_code == 200:
+            return {"state": "ok"}
+        err = r.json().get("error", {})
+        m = re.search(r"project_number:(\d+)", err.get("message", ""))
+        return {"state": "exhausted" if r.status_code == 429 else "error", "project": m.group(1) if m else "",
+                "detail": err.get("status", str(r.status_code))}
+    except Exception as e:  # noqa: BLE001
+        return {"state": "error", "detail": str(e)[:80]}
+
+
+@app.get("/api/keys")
+def keys_status():
+    """حالة كل مفتاح (متاح/منتهي). لا يكشف المفتاح، ويُخزَّن 5 دقائق لتوفير الطلبات."""
+    fresh = request.args.get("fresh") == "1"
+    if fresh or time.time() - _KEYS_CACHE["at"] > 300 or len(_KEYS_CACHE["data"]) != len(KEYS):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            res = list(ex.map(_check_key, KEYS))
+        _KEYS_CACHE["data"] = [dict(r, n=i + 1, tail=k[-4:]) for i, (r, k) in enumerate(zip(res, KEYS))]
+        _KEYS_CACHE["at"] = time.time()
+    return jsonify(keys=_KEYS_CACHE["data"], checked_at=int(_KEYS_CACHE["at"]))
+
+
 @app.get("/api/leads")
 def leads():
     try:
@@ -306,6 +338,17 @@ main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px c
 .btn.sec{background:var(--chip);color:var(--ink);box-shadow:none;font-weight:600;font-size:15px;padding:14px}
 .btn.red{background:#d64545}
 .gap{height:10px}
+.quota{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:14px}
+.quota h2{margin:0 0 4px;font-size:15px;color:var(--mut);font-weight:600}
+.cd{font-size:38px;font-weight:700;letter-spacing:1px;direction:ltr;text-align:center;font-variant-numeric:tabular-nums;color:var(--pri);margin:6px 0 2px}
+.cd.ok{color:var(--ok)}
+.cdsub{text-align:center;color:var(--mut);font-size:13px;margin-bottom:12px;line-height:1.6}
+.krow{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line);font-size:14px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--mut);flex:none}
+.dot.ok{background:var(--ok)}.dot.exhausted{background:#d64545}.dot.error{background:#e0a030}
+.krow .st{margin-inline-start:auto;font-weight:600}
+.krow small{color:var(--mut);direction:ltr}
+.qbtn{margin-top:10px;width:100%;border:0;background:var(--chip);color:var(--ink);border-radius:12px;padding:11px;font-size:14px;display:flex;align-items:center;justify-content:center;gap:6px}
 .bar{height:8px;background:var(--chip);border-radius:4px;overflow:hidden;margin:14px 0 6px;display:none}
 .bar i{display:block;height:100%;width:35%;background:var(--pri);border-radius:4px;animation:m 1.1s infinite ease-in-out}
 @keyframes m{0%{margin-inline-start:-35%}100%{margin-inline-start:100%}}
@@ -362,6 +405,13 @@ nav button.on{color:var(--pri);font-weight:700}
     </section>
 
     <section class="tab" id="tab-search">
+      <div class="quota">
+        <h2>حصة Google اليومية تتجدد بعد</h2>
+        <div class="cd" id="cd">--:--:--</div>
+        <div class="cdsub" id="cdsub"></div>
+        <div id="klist"></div>
+        <button class="qbtn" id="kref"><svg class="i"><use href="#i-refresh"/></svg> فحص المفاتيح الآن</button>
+      </div>
       <div class="panel">
         <h2>بحث جديد في مراكش</h2>
         <label class="sw"><span>استخراج الإيميل والواتساب<small>يزور موقع كل رياض جديد</small></span><input type="checkbox" id="crawl" checked></label>
@@ -406,7 +456,8 @@ nav button.on{color:var(--pri);font-weight:700}
 const $=id=>document.getElementById(id);let ROWS=[],SHOW=40;
 const ic=(n,c)=>`<svg class="i${c?' '+c:''}"><use href="#i-${n}"/></svg>`;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-function showTab(n){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+n));document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===n));$('app').querySelector('main').scrollTop=0}
+let KLOADED=false;
+function showTab(n){if(n==='search'&&!KLOADED){KLOADED=true;loadKeys(false)}document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+n));document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===n));$('app').querySelector('main').scrollTop=0}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
 function setChips(){$('cAll').classList.toggle('on',!$('fE').checked&&!$('fW').checked);$('cE').classList.toggle('on',$('fE').checked);$('cW').classList.toggle('on',$('fW').checked);SHOW=40;render()}
 $('cAll').onclick=()=>{$('fE').checked=$('fW').checked=false;setChips()};
@@ -429,6 +480,23 @@ function render(){
 }
 function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none';$('go').textContent=b?'جاري البحث...':'ابدأ البحث'}
 $('refresh').onclick=()=>{$('refresh').style.opacity=.5;loadStored().finally(()=>$('refresh').style.opacity=1)};
+// مؤقت تجدد الحصة: منتصف الليل بتوقيت كاليفورنيا (Pacific)
+function msToReset(){const p=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'America/Los_Angeles',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date()).map(x=>[x.type,x.value]));
+  const s=(+p.hour%24)*3600+(+p.minute)*60+(+p.second);return (86400-s)*1000}
+let KEYST=[];
+function tickCd(){const ms=msToReset(),s=Math.floor(ms/1000),pad=n=>String(n).padStart(2,'0');
+  $('cd').textContent=`${pad(Math.floor(s/3600))}:${pad(Math.floor(s%3600/60))}:${pad(s%60)}`;
+  const at=new Date(Date.now()+ms).toLocaleTimeString('ar-MA',{hour:'2-digit',minute:'2-digit'});
+  const dead=KEYST.length&&KEYST.every(k=>k.state==='exhausted');
+  $('cd').classList.toggle('ok',KEYST.length>0&&!dead);
+  $('cdsub').textContent=(dead?'كل المفاتيح منتهية الآن. ':'')+`التجدد عند الساعة ${at} بتوقيتك (منتصف الليل بتوقيت كاليفورنيا).`}
+setInterval(tickCd,1000);tickCd();
+const ST={ok:'متاح',exhausted:'منتهٍ اليوم',error:'تعذّر الفحص'};
+async function loadKeys(fresh){$('kref').disabled=true;$('klist').innerHTML='<div class="cdsub">جاري فحص المفاتيح...</div>';
+  try{const d=await (await fetch('/api/keys'+(fresh?'?fresh=1':''))).json();KEYST=d.keys||[];
+    $('klist').innerHTML=KEYST.map(k=>`<div class="krow"><span class="dot ${k.state}"></span>مفتاح ${k.n} <small>…${esc(k.tail)}</small><span class="st">${ST[k.state]||k.state}</span></div>`).join('');tickCd()}
+  catch(e){$('klist').innerHTML='<div class="cdsub">تعذّر فحص المفاتيح.</div>'}$('kref').disabled=false}
+$('kref').onclick=()=>loadKeys(true);
 const fmtRun=r=>{if(!r)return 'لم يعمل بعد.';const d=new Date(r.at);const when=isNaN(d)?r.at:d.toLocaleString('ar-MA',{dateStyle:'medium',timeStyle:'short'});
   return `آخر تشغيل: ${when} — جديد: ${r.new}، أُكمل استخراج: ${r.enriched}، طلبات بحث: ${r.searches}`+(r.quota?' — توقف بسبب حصة Google':'')+(r.error?' — خطأ: '+r.error:'')};
 async function loadRun(){try{const d=await (await fetch('/api/last-run')).json();$('autoout').textContent=fmtRun(d.run)}catch(e){}}
