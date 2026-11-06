@@ -5,6 +5,8 @@
     python3 app.py            ->  http://localhost:5000
 """
 import hashlib
+import io
+import json
 import re
 import hmac
 import ipaddress
@@ -40,7 +42,7 @@ def authed():
 
 @app.before_request
 def guard():
-    if request.path.startswith("/api/") and request.path not in ("/api/login", "/api/cron") and not authed():
+    if request.path.startswith("/api/") and request.path not in ("/api/login", "/api/cron", "/api/public-leads") and not authed():
         return jsonify(error="غير مسجّل الدخول"), 401
 
 
@@ -213,15 +215,81 @@ def keys_status():
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=4) as ex:
             res = list(ex.map(_check_key, KEYS))
-        _KEYS_CACHE["data"] = [dict(r, n=i + 1, tail=k[-4:]) for i, (r, k) in enumerate(zip(res, KEYS))]
+        _KEYS_CACHE["data"] = [dict(r, n=i + 1) for i, (r, k) in enumerate(zip(res, KEYS))]
         _KEYS_CACHE["at"] = time.time()
     return jsonify(keys=_KEYS_CACHE["data"], checked_at=int(_KEYS_CACHE["at"]))
+
+
+_PUB = {"at": 0.0, "rows": [], "v": ""}
+HIDDEN = ("source", "crawled")  # حقول داخلية لا تُعرض للعامة
+
+
+def _version(rows):
+    return hashlib.md5(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:10]
+
+
+@app.get("/api/public-leads")
+def public_leads():
+    """القائمة العامة (بلا تسجيل دخول). كاش 20 ث على الخادم و30 ث على الحافة لتخفيف الحمل."""
+    try:
+        if time.time() - _PUB["at"] > 20:
+            rows = [{k: v for k, v in r.items() if k not in HIDDEN} for r in store.load()]
+            _PUB.update(at=time.time(), rows=rows, v=_version(rows))
+        resp = jsonify(rows=_PUB["rows"], v=_PUB["v"], updated=int(_PUB["at"]))
+        resp.headers["Cache-Control"] = "public, s-maxage=30, stale-while-revalidate=60"
+        return resp
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error="تعذر قراءة القائمة: " + str(e)), 500
+
+
+COLS = [("name", "الاسم"), ("email", "الإيميل"), ("other_emails", "إيميلات أخرى"), ("whatsapp", "واتساب"),
+        ("whatsapp_link", "رابط واتساب"), ("phones", "الهاتف"), ("website", "الموقع"), ("address", "العنوان"),
+        ("maps_url", "الخريطة"), ("rating", "التقييم"), ("reviews", "عدد التقييمات"), ("added_at", "أُضيف في")]
+WIDTHS = {"name": 34, "email": 32, "other_emails": 28, "whatsapp": 16, "whatsapp_link": 30, "phones": 20,
+          "website": 34, "address": 44, "maps_url": 30, "rating": 9, "reviews": 12, "added_at": 20}
+
+
+@app.get("/api/export.xlsx")
+def export_xlsx():
+    """ملف Excel (للمسجّلين فقط): عربي من اليمين، روابط قابلة للنقر، فلتر وتثبيت العنوان."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    rows = store.load()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Riads Marrakech"
+    ws.sheet_view.rightToLeft = True
+    ws.append([label for _, label in COLS])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="B4532A")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    for r in rows:
+        ws.append([r.get(k, "") for k, _ in COLS])
+    for i, (k, _) in enumerate(COLS, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = WIDTHS.get(k, 18)
+        if k in ("whatsapp_link", "website", "maps_url"):
+            for row in range(2, len(rows) + 2):
+                cell = ws.cell(row=row, column=i)
+                if cell.value:
+                    cell.hyperlink = str(cell.value)
+                    cell.font = Font(color="0563C1", underline="single")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    buf = io.BytesIO()
+    wb.save(buf)
+    name = "riads_marrakech_%s.xlsx" % time.strftime("%Y%m%d")
+    return buf.getvalue(), 200, {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": 'attachment; filename="%s"' % name, "Cache-Control": "no-store"}
 
 
 @app.get("/api/leads")
 def leads():
     try:
-        return jsonify(rows=store.load())
+        rows = store.load()
+        return jsonify(rows=rows, v=_version(rows))
     except Exception as e:  # noqa: BLE001
         return jsonify(error="تعذر قراءة قاعدة البيانات: " + str(e)), 500
 
@@ -248,30 +316,9 @@ def delete():
 
 @app.get("/")
 def index():
-    return PAGE if authed() else LOGIN
+    html = PAGE.replace("__ADMIN__", "true" if authed() else "false")
+    return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "private, no-store"}
 
-
-LOGIN = r"""<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Riads Leads</title>
-<meta name="theme-color" content="#b4532a"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<style>
-:root{--bg:#faf6f0;--card:#fff;--ink:#2b2118;--pri:#b4532a;--line:#eadfce}
-@media(prefers-color-scheme:dark){:root{--bg:#1c1713;--card:#272019;--ink:#f3e9dc;--line:#3a3026}}
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);font-family:system-ui,"Segoe UI",Tahoma,sans-serif}
-form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px;width:min(340px,calc(100vw - 32px));text-align:center}
-input{width:100%;padding:12px;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font-size:18px;text-align:center;box-sizing:border-box}
-button{width:100%;background:var(--pri);color:#fff;border:0;border-radius:8px;padding:12px;font-size:16px;cursor:pointer}
-#e{color:#c0392b;min-height:20px;margin-top:8px}
-</style></head><body>
-<form id="f"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#b4532a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V12a8 8 0 0 1 16 0v9"/><path d="M9 21v-5a3 3 0 0 1 6 0v5"/><path d="M12 2v1.5"/></svg><h2 style="margin:8px 0 4px">Riads Leads</h2><div>أدخل كود الدخول</div>
-<input id="c" type="password" autocomplete="current-password" autofocus><button>دخول</button><div id="e"></div></form>
-<script>
-document.getElementById('f').onsubmit=async e=>{e.preventDefault();
-const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('c').value})});
-if(r.ok)location.reload();else document.getElementById('e').textContent=(await r.json()).error;};
-</script></body></html>"""
 
 PAGE = r"""<!doctype html>
 <html lang="ar" dir="rtl">
@@ -338,6 +385,12 @@ main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px c
 .btn.sec{background:var(--chip);color:var(--ink);box-shadow:none;font-weight:600;font-size:15px;padding:14px}
 .btn.red{background:#d64545}
 .gap{height:10px}
+body.pub .adm{display:none!important}body:not(.pub) .pubonly{display:none!important}
+.live{display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px;margin:10px 2px 0}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none;animation:pl 2s infinite}
+.pulse.off{background:#d64545;animation:none}
+@keyframes pl{0%{box-shadow:0 0 0 0 rgba(31,157,85,.5)}70%{box-shadow:0 0 0 8px rgba(31,157,85,0)}100%{box-shadow:0 0 0 0 rgba(31,157,85,0)}}
+.field{width:100%;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:14px;padding:14px 16px;font-size:18px;text-align:center;outline:0;margin:8px 0 12px;letter-spacing:2px}
 .quota{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:14px}
 .quota h2{margin:0 0 4px;font-size:15px;color:var(--mut);font-weight:600}
 .cd{font-size:38px;font-weight:700;letter-spacing:1px;direction:ltr;text-align:center;font-variant-numeric:tabular-nums;color:var(--pri);margin:6px 0 2px}
@@ -401,12 +454,29 @@ nav button.on{color:var(--pri);font-weight:700}
         </div>
         <input type="checkbox" id="fE" hidden><input type="checkbox" id="fW" hidden>
       </div>
-      <div id="list"></div>
+      <div class="live"><span class="pulse" id="pulse"></span><span id="upd">جاري التحميل...</span></div>
+      <div id="lerr" style="color:#d64545;font-size:14px;margin-top:8px"></div>
+      <div id="list" style="margin-top:12px"></div>
     </section>
 
-    <section class="tab" id="tab-search">
+    <section class="tab pubonly" id="tab-login">
+      <div class="panel">
+        <h2>دخول الإدارة</h2>
+        <p class="hint">القائمة مفتوحة للجميع. البحث وإدارة المفاتيح وتصدير Excel لمن لديه الكود فقط.</p>
+        <input class="field" id="code" type="password" placeholder="الكود" autocomplete="current-password">
+        <button class="btn" id="login">دخول</button>
+        <div id="lgerr" style="color:#d64545;margin-top:10px;font-size:14px"></div>
+      </div>
+      <div class="panel">
+        <h2>تثبيت التطبيق</h2>
+        <p class="hint"><b>آيفون:</b> زر المشاركة ثم «إضافة إلى الشاشة الرئيسية».<br><b>أندرويد:</b> قائمة المتصفح ثم «تثبيت التطبيق».</p>
+      </div>
+    </section>
+
+    <section class="tab adm" id="tab-search">
       <div class="quota">
         <h2>حصة Google اليومية تتجدد بعد</h2>
+        <div class="cdsub" id="kcount" style="text-align:start;margin-bottom:4px"></div>
         <div class="cd" id="cd">--:--:--</div>
         <div class="cdsub" id="cdsub"></div>
         <div id="klist"></div>
@@ -426,7 +496,7 @@ nav button.on{color:var(--pri);font-weight:700}
       <div id="err"></div>
     </section>
 
-    <section class="tab" id="tab-more">
+    <section class="tab adm" id="tab-more">
       <div class="panel">
         <h2>البحث التلقائي اليومي</h2>
         <p class="hint" id="autoinfo">يعمل كل يوم تلقائياً (09:13 UTC) ويضيف الرياضات الجديدة فقط ويكمل استخراج الإيميلات.</p>
@@ -435,8 +505,8 @@ nav button.on{color:var(--pri);font-weight:700}
       </div>
       <div class="panel">
         <h2>تصدير</h2>
-        <button class="btn sec" id="csv" disabled><svg class="i"><use href="#i-download"/></svg> تحميل القائمة (CSV)</button>
-        <p class="hint">على الآيفون يفتح القائمة للمشاركة: اختر «حفظ في الملفات».</p>
+        <button class="btn sec" id="xl" disabled><svg class="i"><use href="#i-download"/></svg> إنشاء ملف Excel</button>
+        <p class="hint" id="xlmsg">على الآيفون يفتح الملف للمشاركة: اختر «حفظ في الملفات».</p>
       </div>
       <div class="panel">
         <h2>تثبيت التطبيق</h2>
@@ -448,12 +518,14 @@ nav button.on{color:var(--pri);font-weight:700}
 
   <nav>
     <button class="on" data-tab="list"><svg class="i ic"><use href="#i-list"/></svg>القائمة</button>
-    <button data-tab="search"><svg class="i ic"><use href="#i-search"/></svg>بحث</button>
-    <button data-tab="more"><svg class="i ic"><use href="#i-settings"/></svg>المزيد</button>
+    <button class="adm" data-tab="search"><svg class="i ic"><use href="#i-search"/></svg>بحث</button>
+    <button class="adm" data-tab="more"><svg class="i ic"><use href="#i-settings"/></svg>المزيد</button>
+    <button class="pubonly" data-tab="login"><svg class="i ic"><use href="#i-logout"/></svg>دخول</button>
   </nav>
 </div>
 <script>
-const $=id=>document.getElementById(id);let ROWS=[],SHOW=40;
+const ADMIN=__ADMIN__;document.body.classList.toggle('pub',!ADMIN);
+const $=id=>document.getElementById(id);let ROWS=[],SHOW=40,RUNNING=false,LASTV='';
 const ic=(n,c)=>`<svg class="i${c?' '+c:''}"><use href="#i-${n}"/></svg>`;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let KLOADED=false;
@@ -478,7 +550,7 @@ function render(){
    +(list.length>SHOW?`<button class="more" id="more">عرض المزيد (${list.length-SHOW})</button>`:'');
   const m=$('more');if(m)m.onclick=()=>{SHOW+=40;render()};
 }
-function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none';$('go').textContent=b?'جاري البحث...':'ابدأ البحث'}
+function busy(b){RUNNING=b;$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none';$('go').textContent=b?'جاري البحث...':'ابدأ البحث'}
 $('refresh').onclick=()=>{$('refresh').style.opacity=.5;loadStored().finally(()=>$('refresh').style.opacity=1)};
 // مؤقت تجدد الحصة: منتصف الليل بتوقيت كاليفورنيا (Pacific)
 function msToReset(){const p=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'America/Los_Angeles',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date()).map(x=>[x.type,x.value]));
@@ -493,8 +565,8 @@ function tickCd(){const ms=msToReset(),s=Math.floor(ms/1000),pad=n=>String(n).pa
 setInterval(tickCd,1000);tickCd();
 const ST={ok:'متاح',exhausted:'منتهٍ اليوم',error:'تعذّر الفحص'};
 async function loadKeys(fresh){$('kref').disabled=true;$('klist').innerHTML='<div class="cdsub">جاري فحص المفاتيح...</div>';
-  try{const d=await (await fetch('/api/keys'+(fresh?'?fresh=1':''))).json();KEYST=d.keys||[];
-    $('klist').innerHTML=KEYST.map(k=>`<div class="krow"><span class="dot ${k.state}"></span>مفتاح ${k.n} <small>…${esc(k.tail)}</small><span class="st">${ST[k.state]||k.state}</span></div>`).join('');tickCd()}
+  try{const d=await (await fetch('/api/keys'+(fresh?'?fresh=1':''))).json();KEYST=d.keys||[];{const ok=KEYST.filter(k=>k.state==='ok').length,ex=KEYST.filter(k=>k.state==='exhausted').length;$('kcount').textContent=`عدد المفاتيح: ${KEYST.length} — متاح ${ok}، منتهٍ ${ex}`}
+    $('klist').innerHTML=KEYST.map(k=>`<div class="krow"><span class="dot ${k.state}"></span>مفتاح ${k.n} <span class="st">${ST[k.state]||k.state}</span></div>`).join('');tickCd()}
   catch(e){$('klist').innerHTML='<div class="cdsub">تعذّر فحص المفاتيح.</div>'}$('kref').disabled=false}
 $('kref').onclick=()=>loadKeys(true);
 const fmtRun=r=>{if(!r)return 'لم يعمل بعد.';const d=new Date(r.at);const when=isNaN(d)?r.at:d.toLocaleString('ar-MA',{dateStyle:'medium',timeStyle:'short'});
@@ -513,15 +585,20 @@ function plain(l){ // صف بدون زيارة الموقع (عند انتهاء
   return {name:l.name,email:'',other_emails:'',whatsapp:mob||'',whatsapp_status:mob?'likely (mobile)':'',whatsapp_link:mob?'https://wa.me/'+mob.slice(1):'',phones:(l.phones||[]).join('; '),website:l.website,address:l.address,maps_url:l.maps_url||'',rating:l.rating,reviews:l.reviews,lat:l.lat,lon:l.lon,source:l.source}}
 let STORED=[],FRESH=new Set();
 const srcs=r=>String(r.source||'').split(';').map(s=>s.trim()).filter(Boolean);
-async function getLeads(){for(let k=0;;k++){try{const d=await (await fetch('/api/leads')).json();if(d.error)throw new Error(d.error);return d}catch(e){if(k>=3)throw e;await new Promise(z=>setTimeout(z,1500*(k+1)))}}}
+const LEADS_URL=ADMIN?'/api/leads':'/api/public-leads';
+async function getLeads(){for(let k=0;;k++){try{const d=await (await fetch(LEADS_URL,{cache:'no-store'})).json();if(d.error)throw new Error(d.error);return d}catch(e){if(k>=3)throw e;await new Promise(z=>setTimeout(z,1500*(k+1)))}}}
 async function loadStored(){
   $('msg').textContent='جاري تحميل القائمة المحفوظة...';
-  try{const d=await getLeads();STORED=d.rows||[];ROWS=STORED;render();$('csv').disabled=!ROWS.length;
-    $('msg').textContent=ROWS.length?`المحفوظ سابقاً: ${ROWS.length} رياض`:''}catch(e){$('err').textContent=e.message}
+  try{const d=await getLeads();STORED=d.rows||[];ROWS=STORED;LASTV=d.v||'';render();if(ADMIN)$('xl').disabled=!ROWS.length;setUpd(Date.now());$('lerr').textContent='';
+    $('msg').textContent=ROWS.length?`المحفوظ سابقاً: ${ROWS.length} رياض`:''}catch(e){$('lerr').textContent=e.message;setUpd(null,true)}
 }
-loadStored();loadRun();
+function setUpd(ms,bad){$('pulse').classList.toggle('off',!!bad);$('upd').textContent=bad?'تعذّر التحديث — سنعيد المحاولة':'محدّث تلقائياً • آخر تحديث '+new Date(ms).toLocaleTimeString('ar-MA',{hour:'2-digit',minute:'2-digit'})}
+async function refreshList(){if(RUNNING||document.hidden)return;try{const d=await (await fetch(LEADS_URL,{cache:'no-store'})).json();if(d.error)throw new Error(d.error);
+  if(!d.v||d.v!==LASTV){LASTV=d.v||'';STORED=ROWS=d.rows||[];render();if(ADMIN)$('xl').disabled=!ROWS.length}setUpd(Date.now())}catch(e){setUpd(null,true)}}
+setInterval(refreshList,30000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshList()});
+loadStored();if(ADMIN)loadRun();
 $('go').onclick=async()=>{
-  $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('csv').disabled=true;const buf=[];let addedTotal=0,flushing=Promise.resolve();const addedSrc=new Set();
+  $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('xl').disabled=true;const buf=[];let addedTotal=0,flushing=Promise.resolve();const addedSrc=new Set();
   const flush=(force)=>{if(!buf.length||(!force&&buf.length<40))return;const chunk=buf.splice(0);
     flushing=flushing.then(async()=>{try{await post('/api/save',{rows:chunk})}catch(e){buf.unshift(...chunk)}})};
   const KNOWN=new Set();STORED.forEach(r=>srcs(r).forEach(s=>KNOWN.add(s)));
@@ -560,17 +637,21 @@ $('go').onclick=async()=>{
     if(quota)$('err').textContent='توقف البحث: تجاوز مشروع Google حصته اليومية (SearchTextRequest per day). ارفع الحصة من Google Cloud ← APIs & Services ← Places API (New) ← Quotas، أو أعد المحاولة غداً. ما وُجد قبل التوقف تم حفظه.';
     else if(failed)$('err').textContent=`فشل ${failed} طلب بحث: ${lastErr}`;
   }catch(e){$('err').textContent=e.message}
-  clearInterval(tick);busy(false);render();$('csv').disabled=!ROWS.length;
+  clearInterval(tick);busy(false);render();$('xl').disabled=!ROWS.length;
 };
 $('out').onclick=async()=>{await fetch('/api/logout',{method:'POST'});location.reload()};
 $('stop').onclick=()=>{stopFlag=true;$('msg').textContent='جاري الإيقاف...'};
-$('csv').onclick=()=>{
-  const cols=Object.keys(ROWS[0]);
-  const csv='﻿'+[cols.join(',')].concat(ROWS.map(r=>cols.map(c=>'"'+String(r[c]??'').replace(/"/g,'""')+'"').join(','))).join('\n');
-  const file=new File([csv],'riads_marrakech.csv',{type:'text/csv'});
-  if(navigator.canShare&&navigator.canShare({files:[file]})){navigator.share({files:[file],title:'Riads Marrakech'}).catch(()=>{});return}
-  const a=document.createElement('a');a.href=URL.createObjectURL(file);a.download='riads_marrakech.csv';a.click();
-};
+$('xl').onclick=async()=>{const b=$('xl');b.disabled=true;$('xlmsg').textContent='جاري إنشاء الملف...';
+  try{const r=await fetch('/api/export.xlsx');if(r.status===401){location.reload();return}if(!r.ok)throw new Error(r.status);
+    const blob=await r.blob(),name='riads_marrakech.xlsx',file=new File([blob],name,{type:blob.type});
+    if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:'Riads Marrakech'}).catch(()=>{})}
+    else{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click()}
+    $('xlmsg').textContent='تم إنشاء الملف ('+ROWS.length+' رياض).'}
+  catch(e){$('xlmsg').textContent='تعذّر إنشاء الملف: '+e.message}b.disabled=false};
+// دخول الإدارة
+async function doLogin(){const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:$('code').value})});
+  if(r.ok)location.reload();else $('lgerr').textContent=(await r.json()).error||'تعذّر الدخول'}
+$('login').onclick=doLogin;$('code').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
 </script></body></html>"""
 
 if __name__ == "__main__":
