@@ -1,1 +1,13 @@
-{ "functions": { "app.py": { "maxDuration": 60 } } }
+{
+  "functions": {
+    "app.py": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "13 9 * * *"
+    }
+  ]
+}

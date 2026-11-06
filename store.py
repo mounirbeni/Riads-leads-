@@ -205,6 +205,8 @@ def merge_into(old, new):
               "rating", "reviews", "lat", "lon"):
         if old.get(k) in ("", None) and new.get(k) not in ("", None):
             old[k] = new[k]
+    if new.get("crawled"):
+        old["crawled"] = 1
     old["source"] = "; ".join(sorted(sources_of(old) | sources_of(new)))
     return old
 
@@ -226,3 +228,31 @@ def add_rows(stored, incoming):
             added_src |= sources_of(new)
     rows.sort(key=lambda r: (not r.get("email"), not r.get("whatsapp"), (r.get("name") or "").lower()))
     return rows, added, sorted(added_src)
+
+
+# ----------------------------------------------------------------- سجل البحث التلقائي
+RUN_PREFIX = "runs/"
+LOCAL_RUN = os.path.join(os.path.dirname(__file__), "data", "last_run.json")
+
+
+def record_run(info):
+    if USE_BLOB:
+        from vercel.blob import sync as blob
+        name = f"{RUN_PREFIX}{int(time.time() * 1000):013d}-{uuid.uuid4().hex[:6]}.json"
+        blob.put_blob(name, json.dumps(info, ensure_ascii=False).encode("utf-8"), access="private",
+                      content_type="application/json", add_random_suffix=False, allow_overwrite=False)
+    else:
+        os.makedirs(os.path.dirname(LOCAL_RUN), exist_ok=True)
+        with open(LOCAL_RUN, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False)
+
+
+def last_run():
+    try:
+        if USE_BLOB:
+            names = _list(RUN_PREFIX)
+            return _blob_json(names[-1]) if names else None
+        with open(LOCAL_RUN, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return None

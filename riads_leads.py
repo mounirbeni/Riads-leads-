@@ -150,6 +150,41 @@ def search_cell(api_key, query, cell, stop=lambda: False):
         time.sleep(1.5)
 
 
+class QuotaExhausted(Exception):
+    """انتهت حصة كل المفاتيح."""
+
+
+class KeyPool:
+    """عدة مفاتيح Google: توزيع بالتناوب + تحويل تلقائي عند خطأ الحصة (429)."""
+
+    def __init__(self, keys):
+        self.keys = list(keys)
+        self.exhausted = {}  # مفتاح -> وقت العودة
+
+    def alive(self):
+        now = time.time()
+        return [k for k in self.keys if self.exhausted.get(k, 0) < now]
+
+    def search(self, q_index, cell_index, cells=None):
+        """قائمة الأماكن الخام لاستعلام واحد في خلية واحدة. يرفع QuotaExhausted إن انتهت كل الحصص."""
+        cells = cells or list(grid_cells())
+        query, cell = QUERIES[q_index], cells[cell_index]
+        keys = self.alive() or self.keys
+        start = (q_index + cell_index) % max(len(keys), 1)
+        last = None
+        for i in range(len(keys)):
+            key = keys[(start + i) % len(keys)]
+            try:
+                return list(search_cell(key, query, cell))
+            except RuntimeError as e:
+                last = e
+                if "Google API 429" in str(e):
+                    self.exhausted[key] = time.time() + 600
+                    continue
+                raise
+        raise QuotaExhausted(str(last))
+
+
 def in_marrakech(lat, lon):
     s, w, n, e = MARRAKECH_BBOX
     return lat is not None and lon is not None and s <= lat <= n and w <= lon <= e

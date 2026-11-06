@@ -17,6 +17,7 @@ from flask import Flask, jsonify, make_response, request
 import riads_leads as core
 import base64
 
+import auto
 import store
 from icons import ICONS
 
@@ -25,7 +26,8 @@ KEYS = [k.strip() for name in ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_API_KEY_2", "
         for k in os.environ.get(name, "").split(",") if k.strip()]
 KEYS = list(dict.fromkeys(KEYS))  # بدون تكرار
 KEY = KEYS[0] if KEYS else ""
-EXHAUSTED = {}  # مفتاح -> وقت العودة (بعد خطأ الحصة)
+POOL = core.KeyPool(KEYS)  # توزيع المفاتيح + التحويل عند انتهاء الحصة
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
 TOKEN = hmac.new(("riads|" + ACCESS_CODE + "|" + KEY).encode(), b"ok", hashlib.sha256).hexdigest()
 
@@ -36,7 +38,7 @@ def authed():
 
 @app.before_request
 def guard():
-    if request.path.startswith("/api/") and request.path != "/api/login" and not authed():
+    if request.path.startswith("/api/") and request.path not in ("/api/login", "/api/cron") and not authed():
         return jsonify(error="غير مسجّل الدخول"), 401
 
 
@@ -89,22 +91,14 @@ def search():
         q, c = core.QUERIES[int(d["q"])], CELLS[int(d["cell"])]
     except Exception as e:  # noqa: BLE001
         return jsonify(error=str(e)), 400
-    now, start = time.time(), (int(d["q"]) + int(d["cell"])) % len(KEYS)
-    order = [KEYS[(start + i) % len(KEYS)] for i in range(len(KEYS))]
-    order = [k for k in order if EXHAUSTED.get(k, 0) < now] or order  # الأحياء أولاً
-    last = None
-    for key in order:
-        try:
-            places = list(core.search_cell(key, q, c))
-            leads = [l for l in map(core.place_to_lead, places) if l]
-            return jsonify(leads=leads, raw=len(places))
-        except Exception as e:  # noqa: BLE001
-            last = e
-            if "Google API 429" in str(e):
-                EXHAUSTED[key] = now + 600  # استرح 10 دقائق
-                continue
-            break
-    return jsonify(error=str(last)), (429 if "Google API 429" in str(last) else 502)
+    try:
+        places = POOL.search(int(d["q"]), int(d["cell"]), CELLS)
+        leads = [l for l in map(core.place_to_lead, places) if l]
+        return jsonify(leads=leads, raw=len(places))
+    except core.QuotaExhausted as e:
+        return jsonify(error="Google API 429: " + str(e)), 429
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=str(e)), 502
 
 
 @app.post("/api/enrich")
@@ -119,7 +113,9 @@ def enrich():
             core.enrich(lead)
         except Exception:  # noqa: BLE001
             pass
-    return jsonify(row=core.finalize(lead))
+    row = core.finalize(lead)
+    row["crawled"] = 1
+    return jsonify(row=row)
 
 
 MANIFEST = {
@@ -166,6 +162,28 @@ def icon512():
 @app.get("/apple-touch-icon.png")
 def apple_icon():
     return _icon("180")
+
+
+@app.get("/api/cron")
+def cron():
+    """يستدعيه Vercel Cron يومياً (Authorization: Bearer CRON_SECRET)."""
+    got = request.headers.get("Authorization", "")
+    if not CRON_SECRET or not hmac.compare_digest(got, "Bearer " + CRON_SECRET):
+        return jsonify(error="unauthorized"), 401
+    return jsonify(auto.run(KEYS, public_url=public_url))
+
+
+@app.post("/api/auto-run")
+def auto_run():
+    """زر «تشغيل الآن» في الواجهة (يتطلب تسجيل الدخول)."""
+    if not KEYS:
+        return jsonify(error="GOOGLE_MAPS_API_KEY غير مضبوط على الخادم"), 500
+    return jsonify(auto.run(KEYS, public_url=public_url))
+
+
+@app.get("/api/last-run")
+def last_run():
+    return jsonify(run=store.last_run())
 
 
 @app.get("/api/leads")
@@ -360,6 +378,12 @@ nav button.on{color:var(--pri);font-weight:700}
 
     <section class="tab" id="tab-more">
       <div class="panel">
+        <h2>البحث التلقائي اليومي</h2>
+        <p class="hint" id="autoinfo">يعمل كل يوم تلقائياً (09:13 UTC) ويضيف الرياضات الجديدة فقط ويكمل استخراج الإيميلات.</p>
+        <button class="btn sec" id="autorun"><svg class="i"><use href="#i-refresh"/></svg> تشغيل الآن</button>
+        <p class="hint" id="autoout"></p>
+      </div>
+      <div class="panel">
         <h2>تصدير</h2>
         <button class="btn sec" id="csv" disabled><svg class="i"><use href="#i-download"/></svg> تحميل القائمة (CSV)</button>
         <p class="hint">على الآيفون يفتح القائمة للمشاركة: اختر «حفظ في الملفات».</p>
@@ -405,6 +429,11 @@ function render(){
 }
 function busy(b){$('go').disabled=b;$('stop').disabled=!b;$('bar').style.display=b?'block':'none';$('go').textContent=b?'جاري البحث...':'ابدأ البحث'}
 $('refresh').onclick=()=>{$('refresh').style.opacity=.5;loadStored().finally(()=>$('refresh').style.opacity=1)};
+const fmtRun=r=>{if(!r)return 'لم يعمل بعد.';const d=new Date(r.at);const when=isNaN(d)?r.at:d.toLocaleString('ar-MA',{dateStyle:'medium',timeStyle:'short'});
+  return `آخر تشغيل: ${when} — جديد: ${r.new}، أُكمل استخراج: ${r.enriched}، طلبات بحث: ${r.searches}`+(r.quota?' — توقف بسبب حصة Google':'')+(r.error?' — خطأ: '+r.error:'')};
+async function loadRun(){try{const d=await (await fetch('/api/last-run')).json();$('autoout').textContent=fmtRun(d.run)}catch(e){}}
+$('autorun').onclick=async()=>{const b=$('autorun');b.disabled=true;$('autoout').textContent='جاري التشغيل... (حتى دقيقة)';
+  try{const r=await post('/api/auto-run',{});$('autoout').textContent=fmtRun(r);await loadStored()}catch(e){$('autoout').textContent='تعذّر التشغيل: '+e.message}b.disabled=false};
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 let stopFlag=false;
 const LIMIT=120000,SEARCH_SHARE=0.6; // 2 دقيقة كحد أقصى للعملية كاملة
@@ -422,7 +451,7 @@ async function loadStored(){
   try{const d=await getLeads();STORED=d.rows||[];ROWS=STORED;render();$('csv').disabled=!ROWS.length;
     $('msg').textContent=ROWS.length?`المحفوظ سابقاً: ${ROWS.length} رياض`:''}catch(e){$('err').textContent=e.message}
 }
-loadStored();
+loadStored();loadRun();
 $('go').onclick=async()=>{
   $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('csv').disabled=true;const buf=[];let addedTotal=0,flushing=Promise.resolve();const addedSrc=new Set();
   const flush=(force)=>{if(!buf.length||(!force&&buf.length<40))return;const chunk=buf.splice(0);
