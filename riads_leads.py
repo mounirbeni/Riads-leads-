@@ -125,6 +125,7 @@ def grid_cells(n=GRID):
 class Places(list):
     """نتائج بحث خلية. early=True: توقفنا مبكراً لأن الصفحة كلها معروفة (توفير للحصة)."""
     early = False
+    key_index = None
 
 
 def search_cell(api_key, query, cell, stop=lambda: False, stats=None, known=None, out=None):
@@ -186,30 +187,50 @@ def skip_cells(state, now=None, n_cells=None):
 
 
 class KeyPool:
-    """عدة مفاتيح Google: توزيع بالتناوب + تحويل تلقائي عند خطأ الحصة (429) + عدّاد استعمال."""
+    """عدة مفاتيح Google بنظام الأدوار: كل مفتاح يأخذ دفعة خلايا في دوره، وعند انتهاء حصته ينتقل الدور لمن بعده."""
 
-    def __init__(self, keys, on_usage=None, on_exhausted=None):
+    def __init__(self, keys, on_usage=None, on_exhausted=None, dead_fn=None):
         self.keys = list(keys)
-        self.exhausted = {}  # مفتاح -> وقت العودة
+        self.exhausted = {}  # مفتاح -> وقت العودة (ذاكرة هذه النسخة)
         self.on_usage = on_usage  # دالة (رقم المفتاح، عدد الطلبات)
         self.on_exhausted = on_exhausted  # دالة (رقم المفتاح) عند خطأ الحصة
+        self.dead_fn = dead_fn  # دالة تعيد أرقام المفاتيح المنتهية اليوم (من العدّاد الدائم)
 
-    def alive(self):
+    def dead_idx(self):
+        """أرقام المفاتيح المنتهية اليوم (من الذاكرة الدائمة + ما اكتشفته هذه النسخة)."""
         now = time.time()
-        return [k for k in self.keys if self.exhausted.get(k, 0) < now]
+        dead = {i for i, k in enumerate(self.keys) if self.exhausted.get(k, 0) > now}
+        if self.dead_fn:
+            try:
+                dead |= set(self.dead_fn())
+            except Exception:  # noqa: BLE001
+                pass
+        return sorted(dead)
 
-    def search(self, q_index, cell_index, cells=None, known=None):
-        """نتائج (Places) استعلام واحد في خلية واحدة. يرفع QuotaExhausted إن انتهت كل الحصص."""
+    def alive_idx(self):
+        dead = set(self.dead_idx())
+        return [i for i in range(len(self.keys)) if i not in dead]
+
+    def search(self, q_index, cell_index, cells=None, known=None, prefer=None):
+        """نتائج (Places) استعلام واحد في خلية. prefer: رقم المفتاح صاحب الدور.
+        ينتقل لمن بعده فقط إن انتهت حصته (429). يرفع QuotaExhausted إن انتهت كل الحصص."""
         cells = cells or list(grid_cells())
         query, cell = QUERIES[q_index], cells[cell_index]
-        keys = self.alive() or self.keys
-        start = (q_index + cell_index) % max(len(keys), 1)
+        idxs = self.alive_idx() or list(range(len(self.keys)))
+        if prefer is not None and prefer in idxs:
+            pos = idxs.index(prefer)
+        elif prefer is not None:  # صاحب الدور منتهٍ: أقرب مفتاح حي بعده
+            pos = next((i for i, x in enumerate(idxs) if x > prefer), 0)
+        else:
+            pos = (q_index + cell_index) % max(len(idxs), 1)
+        order = idxs[pos:] + idxs[:pos]
         last = None
-        for i in range(len(keys)):
-            key = keys[(start + i) % len(keys)]
+        for idx in order:
+            key = self.keys[idx]
             stats, res = {"requests": 0}, Places()
             try:
                 res.extend(search_cell(key, query, cell, stats=stats, known=known, out=res))
+                res.key_index = idx
                 return res
             except RuntimeError as e:
                 last = e
@@ -217,7 +238,7 @@ class KeyPool:
                     self.exhausted[key] = time.time() + 600
                     if self.on_exhausted:
                         try:
-                            self.on_exhausted(self.keys.index(key))
+                            self.on_exhausted(idx)
                         except Exception:  # noqa: BLE001
                             pass
                     continue
@@ -225,10 +246,18 @@ class KeyPool:
             finally:
                 if self.on_usage and stats["requests"]:
                     try:
-                        self.on_usage(self.keys.index(key), stats["requests"])
+                        self.on_usage(idx, stats["requests"])
                     except Exception:  # noqa: BLE001
                         pass
         raise QuotaExhausted(str(last))
+
+
+def turn_batches(cells, n_keys, min_size=4):
+    """يقسّم الخلايا إلى دفعات بعدد المفاتيح الحيّة: لكل مفتاح دفعة في دوره."""
+    if not cells:
+        return []
+    size = max(min_size, -(-len(cells) // max(n_keys, 1)))
+    return [cells[i:i + size] for i in range(0, len(cells), size)]
 
 
 def in_marrakech(lat, lon):

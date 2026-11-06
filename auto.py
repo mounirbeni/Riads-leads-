@@ -44,37 +44,53 @@ def run(keys, budget=50, public_url=lambda u: True):
         skip = set(core.skip_cells(store.cell_state()))  # خلايا فُحصت حديثاً: لا داعي لإعادتها
         info["skipped_cells"] = len(skip)
 
-        # 1) البحث
-        found, sat, raw0 = {}, {}, {}
+        # 1) البحث بنظام الأدوار: كل مفتاح يبحث دفعته ثم تُحفظ قائمته، ثم المفتاح التالي
+        found, sat, raw0, saved = {}, {}, {}, set()
+        by_key = {}
         search_end = t0 + budget * SEARCH_SHARE
+        turn = 0
         for q in range(len(core.QUERIES)):
             todo = [c for c in range(len(cells)) if (c not in skip if q == 0 else sat.get(c, 0) >= 50)]
             if not todo or time.time() > search_end or info["quota"]:
                 break
+            for batch in core.turn_batches(todo, len(pool.alive_idx()) or len(keys)):
+                alive = pool.alive_idx()
+                if not alive or time.time() > search_end:
+                    info["quota"] = info["quota"] or not alive
+                    break
+                key_i = alive[turn % len(alive)]
+                turn += 1
 
-            def one(c, q=q):
-                if time.time() > search_end or info["quota"]:
-                    return
-                try:
-                    places = pool.search(q, c, cells, known=known_ids)
-                except core.QuotaExhausted:
-                    info["quota"] = True
-                    return
-                except Exception as e:  # noqa: BLE001
-                    info["error"] = str(e)[:200]
-                    return
-                info["searches"] += 1
-                n = 60 if places.early else len(places)
-                sat[c] = max(sat.get(c, 0), n)
-                if q == 0:
-                    raw0[c] = n
-                for p in places:
-                    lead = core.place_to_lead(p)
-                    if lead:
-                        found[lead["source"]] = lead
+                def one(c, q=q, key_i=key_i):
+                    if time.time() > search_end or info["quota"]:
+                        return
+                    try:
+                        places = pool.search(q, c, cells, known=known_ids, prefer=key_i)
+                    except core.QuotaExhausted:
+                        info["quota"] = True
+                        return
+                    except Exception as e:  # noqa: BLE001
+                        info["error"] = str(e)[:200]
+                        return
+                    info["searches"] += 1
+                    n = 60 if places.early else len(places)
+                    sat[c] = max(sat.get(c, 0), n)
+                    if q == 0:
+                        raw0[c] = n
+                    for p in places:
+                        lead = core.place_to_lead(p)
+                        if lead:
+                            found[lead["source"]] = lead
+                            by_key[places.key_index] = by_key.get(places.key_index, 0) + 1
 
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                list(ex.map(one, todo))
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    list(ex.map(one, batch))
+                # قائمة هذا المفتاح تُحفظ فوراً قبل أن يبدأ دور المفتاح التالي
+                fresh = [l for s, l in found.items() if s not in known and s not in saved]
+                if fresh:
+                    store.save_add([core.finalize(l) for l in fresh])
+                    saved.update(l["source"] for l in fresh)
+        info["by_key"] = {str(k + 1): v for k, v in sorted(by_key.items())}
         info["found"] = len(found)
         try:
             store.record_cells(raw0)
@@ -84,8 +100,9 @@ def run(keys, budget=50, public_url=lambda u: True):
         # 2) حفظ الجدد فوراً
         new = [l for s, l in found.items() if s not in known]
         info["new"] = len(new)
-        if new:
-            store.save_add([core.finalize(l) for l in new])
+        pending = [l for l in new if l["source"] not in saved]
+        if pending:
+            store.save_add([core.finalize(l) for l in pending])
 
         # 3) استخراج الإيميل/الواتساب: الجدد أولاً ثم ما لم يُفحص
         queue = [l for l in new if l["website"]]

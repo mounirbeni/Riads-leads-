@@ -30,8 +30,19 @@ KEYS = [k.strip() for name in ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_API_KEY_2", "
         for k in os.environ.get(name, "").split(",") if k.strip()]
 KEYS = list(dict.fromkeys(KEYS))  # بدون تكرار
 KEY = KEYS[0] if KEYS else ""
-POOL = core.KeyPool(KEYS, on_usage=store.record_usage, on_exhausted=store.mark_exhausted)  # توزيع + تحويل + عدّاد
 DAILY_LIMIT = int(os.environ.get("GOOGLE_DAILY_LIMIT", "100"))  # حد Google اليومي لكل مشروع
+_DEAD = {"at": 0.0, "idx": set()}
+
+
+def dead_keys():
+    """المفاتيح المنتهية اليوم (من العدّاد الدائم)، كاش 20 ثانية."""
+    if time.time() - _DEAD["at"] > 20:
+        used, dead = store.usage_today()
+        _DEAD.update(at=time.time(), idx=set(dead) | {i for i, u in used.items() if u >= DAILY_LIMIT})
+    return _DEAD["idx"]
+
+
+POOL = core.KeyPool(KEYS, on_usage=store.record_usage, on_exhausted=store.mark_exhausted, dead_fn=dead_keys)
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
 TOKEN = hmac.new(("riads|" + ACCESS_CODE + "|" + KEY).encode(), b"ok", hashlib.sha256).hexdigest()
@@ -84,7 +95,7 @@ def public_url(u):
 @app.get("/api/plan")
 def plan():
     return jsonify(queries=len(core.QUERIES), cells=len(CELLS), configured=bool(KEYS), keys=len(KEYS),
-                   skip=core.skip_cells(store.cell_state()))
+                   skip=core.skip_cells(store.cell_state()), dead=POOL.dead_idx())
 
 
 @app.post("/api/search")
@@ -99,9 +110,10 @@ def search():
         return jsonify(error=str(e)), 400
     try:
         known = None if d.get("full") else store.known_ids()  # يوفّر الصفحات المعروفة
-        places = POOL.search(int(d["q"]), int(d["cell"]), CELLS, known=known)
+        prefer = int(d["key"]) if d.get("key") is not None else None  # صاحب الدور
+        places = POOL.search(int(d["q"]), int(d["cell"]), CELLS, known=known, prefer=prefer)
         leads = [l for l in map(core.place_to_lead, places) if l]
-        return jsonify(leads=leads, raw=60 if places.early else len(places))
+        return jsonify(leads=leads, raw=60 if places.early else len(places), key=places.key_index, dead=POOL.dead_idx())
     except core.QuotaExhausted as e:
         return jsonify(error="Google API 429: " + str(e)), 429
     except Exception as e:  # noqa: BLE001
@@ -522,6 +534,7 @@ nav button.on{color:var(--pri);font-weight:700}
       <button class="btn sec red" id="stop" disabled style="color:#fff">إيقاف</button>
       <div class="bar" id="bar"><i></i></div>
       <div id="time"></div>
+      <div id="turns" class="hint" style="margin:6px 0"></div>
       <div id="msg"></div>
       <div id="err"></div>
     </section>
@@ -628,7 +641,7 @@ async function refreshList(){if(RUNNING||document.hidden)return;try{const d=awai
 setInterval(refreshList,30000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshList()});
 loadStored();if(ADMIN)loadRun();
 $('go').onclick=async()=>{
-  $('err').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('xl').disabled=true;const buf=[];let addedTotal=0,flushing=Promise.resolve();const addedSrc=new Set();
+  $('err').textContent='';$('turns').textContent='';stopFlag=false;FRESH=new Set();busy(true);$('xl').disabled=true;const buf=[];let addedTotal=0,flushing=Promise.resolve();const addedSrc=new Set();
   const flush=(force)=>{if(!buf.length||(!force&&buf.length<40))return;const chunk=buf.splice(0);
     flushing=flushing.then(async()=>{try{await post('/api/save',{rows:chunk})}catch(e){buf.unshift(...chunk)}})};
   const KNOWN=new Set();STORED.forEach(r=>srcs(r).forEach(s=>KNOWN.add(s)));
@@ -636,25 +649,41 @@ $('go').onclick=async()=>{
   try{
     const plan=await (await fetch('/api/plan')).json();
     if(!plan.configured)throw new Error('API key غير مضبوط على الخادم');
-    // توفير الاستهلاك: الكلمة الأولى على كل الخلايا، وباقي الكلمات فقط على الخلايا "المشبعة" (≥50 نتيجة = قد يكون فيها المزيد)
-    const found=new Map(),sat={},raw0={};let done=0,failed=0,lastErr='',quota=false,sent=0;
+    // نظام الأدوار: كل مفتاح يبحث دفعة خلايا في دوره ويُحفظ ما وجده، ثم يبدأ المفتاح التالي (1 ← 2 ← 3 ...)
+    // توفير الاستهلاك: الكلمة الأولى على الخلايا غير المفحوصة حديثاً، وباقي الكلمات فقط على الخلايا المزدحمة (≥50 نتيجة)
+    const found=new Map(),sat={},raw0={},pushed=new Set();let done=0,failed=0,lastErr='',quota=false;
     const wide=$('wide').checked,SEARCH_END=t0+LIMIT*SEARCH_SHARE;
+    let alive=[...Array(plan.keys||1).keys()].filter(i=>!(plan.dead||[]).includes(i));
+    if(!alive.length){quota=true}
+    let turn=0;const perKey={},tlog=[];
     for(let q=0;q<plan.queries&&!stopFlag&&!quota&&Date.now()<SEARCH_END;q++){
       const skip=new Set(wide?[]:(plan.skip||[]));
       const cells=[];for(let c=0;c<plan.cells;c++)if(q===0?!skip.has(c):(wide||(sat[c]||0)>=50))cells.push(c);
       if(!cells.length)break;
-      await pool(cells,8,async c=>{
-        sent++;
-        try{const r=await post('/api/search',{q,cell:c,full:wide});r.leads.forEach(l=>found.set(l.source,l));sat[c]=Math.max(sat[c]||0,r.raw||0);if(q===0)raw0[c]=r.raw||0}
-        catch(e){failed++;lastErr=e.message;if(/Google API 429|Quota/i.test(lastErr))quota=true}
-        done++;$('msg').textContent=`بحث Google Maps: كلمة ${q+1}/${plan.queries} - ${done} طلب - وُجد ${found.size} رياض`;
-      },SEARCH_END,()=>!quota);
+      const size=Math.max(4,Math.ceil(cells.length/Math.max(alive.length,1)));
+      for(let s=0;s<cells.length&&!stopFlag&&!quota&&Date.now()<SEARCH_END;s+=size){
+        if(!alive.length){quota=true;break}
+        const key=alive[turn%alive.length];turn++;let used=0;
+        $('msg').textContent=`دور مفتاح ${key+1} — كلمة ${q+1}/${plan.queries} — وُجد ${found.size} رياض`;
+        await pool(cells.slice(s,s+size),6,async c=>{
+          try{const r=await post('/api/search',{q,cell:c,full:wide,key});
+            (r.dead||[]).forEach(d=>{alive=alive.filter(x=>x!==d)});
+            r.leads.forEach(l=>found.set(l.source,l));used=r.key??key;sat[c]=Math.max(sat[c]||0,r.raw||0);if(q===0)raw0[c]=r.raw||0}
+          catch(e){failed++;lastErr=e.message;if(/Google API 429|Quota/i.test(lastErr))quota=true}
+          done++;
+        },SEARCH_END,()=>!quota);
+        // حفظ قائمة هذا المفتاح فوراً قبل أن يبدأ دور التالي
+        const fresh=[...found.values()].filter(l=>!KNOWN.has(l.source)&&!pushed.has(l.source));
+        fresh.forEach(l=>{pushed.add(l.source);buf.push(plain(l))});flush(true);
+        perKey[key]=(perKey[key]||0)+fresh.length;
+        tlog.push(`مفتاح ${key+1}: ${fresh.length} جديد`);$('turns').textContent=tlog.join(' ← ');
+      }
     }
     if(Object.keys(raw0).length)post('/api/cells',{raw:raw0}).catch(()=>{});
     if(done&&failed===done&&!quota)throw new Error(lastErr);
     const leads=[...found.values()].filter(l=>!KNOWN.has(l.source)),doCrawl=$('crawl').checked,seen=new Set();let n=0;
     const already=found.size-leads.length;
-    leads.forEach(l=>buf.push(plain(l)));flush(true); // احفظ نتائج Google فوراً قبل زيارة المواقع
+    leads.filter(l=>!pushed.has(l.source)).forEach(l=>buf.push(plain(l)));flush(true); // ما لم يُحفظ بعد
     if(doCrawl)await pool(leads,12,async l=>{
       try{buf.push((await post('/api/enrich',l)).row);seen.add(l.source);flush(false)}catch(e){}
       n++;$('msg').textContent=`رياضات جديدة: استخراج الإيميل والواتساب ${n}/${leads.length}`;
