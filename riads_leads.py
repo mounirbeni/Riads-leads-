@@ -122,8 +122,15 @@ def grid_cells(n=GRID):
             yield (s + i * dl, w + j * dn, s + (i + 1) * dl, w + (j + 1) * dn)
 
 
-def search_cell(api_key, query, cell, stop=lambda: False):
-    """كل صفحات البحث (حتى 60 نتيجة) داخل خلية واحدة."""
+class Places(list):
+    """نتائج بحث خلية. early=True: توقفنا مبكراً لأن الصفحة كلها معروفة (توفير للحصة)."""
+    early = False
+
+
+def search_cell(api_key, query, cell, stop=lambda: False, stats=None, known=None, out=None):
+    """صفحات البحث (حتى 60 نتيجة) داخل خلية واحدة.
+    stats: يُزاد stats["requests"] مع كل طلب ناجح إلى Google (لعدّاد الحصة).
+    known: مجموعة معرّفات أماكن معروفة؛ إن كانت الصفحة كلها معروفة نتوقف ولا نطلب الصفحات التالية."""
     s, w, n, e = cell
     body = {
         "textQuery": query, "pageSize": 20,
@@ -141,10 +148,17 @@ def search_cell(api_key, query, cell, stop=lambda: False):
             except Exception:  # noqa: BLE001
                 msg = r.text[:200]
             raise RuntimeError(f"Google API {r.status_code}: {msg}")
+        if stats is not None:
+            stats["requests"] = stats.get("requests", 0) + 1
         data = r.json()
-        yield from data.get("places", [])
+        page = data.get("places", [])
+        yield from page
         tok = data.get("nextPageToken")
         if not tok:
+            return
+        if known and page and all(p.get("id") in known for p in page):
+            if out is not None:
+                out.early = True
             return
         body["pageToken"] = tok
         time.sleep(1.5)
@@ -154,19 +168,38 @@ class QuotaExhausted(Exception):
     """انتهت حصة كل المفاتيح."""
 
 
-class KeyPool:
-    """عدة مفاتيح Google: توزيع بالتناوب + تحويل تلقائي عند خطأ الحصة (429)."""
+# ---- ذاكرة الخلايا: متى نعيد فحص كل خلية (توفير طلبات Google) ----
+DAY = 86400
 
-    def __init__(self, keys):
+
+def skip_cells(state, now=None, n_cells=None):
+    """الخلايا التي لا داعي لفحصها الآن. state: {cell: {"raw": n, "at": ts}}.
+    فارغة: كل 14 يوماً. صغيرة (<20): كل 7 أيام. متوسطة (<50): كل 3 أيام. مزدحمة: كل يوم."""
+    now = now or time.time()
+    skip = set()
+    for c, st in (state or {}).items():
+        raw, age = st.get("raw", 60), now - st.get("at", 0)
+        wait = 14 * DAY if raw == 0 else 7 * DAY if raw < 20 else 3 * DAY if raw < 50 else DAY
+        if age < wait:
+            skip.add(int(c))
+    return sorted(skip)
+
+
+class KeyPool:
+    """عدة مفاتيح Google: توزيع بالتناوب + تحويل تلقائي عند خطأ الحصة (429) + عدّاد استعمال."""
+
+    def __init__(self, keys, on_usage=None, on_exhausted=None):
         self.keys = list(keys)
         self.exhausted = {}  # مفتاح -> وقت العودة
+        self.on_usage = on_usage  # دالة (رقم المفتاح، عدد الطلبات)
+        self.on_exhausted = on_exhausted  # دالة (رقم المفتاح) عند خطأ الحصة
 
     def alive(self):
         now = time.time()
         return [k for k in self.keys if self.exhausted.get(k, 0) < now]
 
-    def search(self, q_index, cell_index, cells=None):
-        """قائمة الأماكن الخام لاستعلام واحد في خلية واحدة. يرفع QuotaExhausted إن انتهت كل الحصص."""
+    def search(self, q_index, cell_index, cells=None, known=None):
+        """نتائج (Places) استعلام واحد في خلية واحدة. يرفع QuotaExhausted إن انتهت كل الحصص."""
         cells = cells or list(grid_cells())
         query, cell = QUERIES[q_index], cells[cell_index]
         keys = self.alive() or self.keys
@@ -174,14 +207,27 @@ class KeyPool:
         last = None
         for i in range(len(keys)):
             key = keys[(start + i) % len(keys)]
+            stats, res = {"requests": 0}, Places()
             try:
-                return list(search_cell(key, query, cell))
+                res.extend(search_cell(key, query, cell, stats=stats, known=known, out=res))
+                return res
             except RuntimeError as e:
                 last = e
                 if "Google API 429" in str(e):
                     self.exhausted[key] = time.time() + 600
+                    if self.on_exhausted:
+                        try:
+                            self.on_exhausted(self.keys.index(key))
+                        except Exception:  # noqa: BLE001
+                            pass
                     continue
                 raise
+            finally:
+                if self.on_usage and stats["requests"]:
+                    try:
+                        self.on_usage(self.keys.index(key), stats["requests"])
+                    except Exception:  # noqa: BLE001
+                        pass
         raise QuotaExhausted(str(last))
 
 

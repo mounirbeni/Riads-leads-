@@ -32,7 +32,7 @@ def run(keys, budget=50, public_url=lambda u: True):
     t0 = time.time()
     info = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "new": 0, "enriched": 0,
             "searches": 0, "found": 0, "quota": False, "error": ""}
-    pool = core.KeyPool(keys)
+    pool = core.KeyPool(keys, on_usage=store.record_usage, on_exhausted=store.mark_exhausted)
     cells = list(core.grid_cells())
     try:
         stored = store.load()
@@ -40,11 +40,15 @@ def run(keys, budget=50, public_url=lambda u: True):
         for r in stored:
             known |= store.sources_of(r)
 
+        known_ids = store.known_ids()
+        skip = set(core.skip_cells(store.cell_state()))  # خلايا فُحصت حديثاً: لا داعي لإعادتها
+        info["skipped_cells"] = len(skip)
+
         # 1) البحث
-        found, sat = {}, {}
+        found, sat, raw0 = {}, {}, {}
         search_end = t0 + budget * SEARCH_SHARE
         for q in range(len(core.QUERIES)):
-            todo = [c for c in range(len(cells)) if q == 0 or sat.get(c, 0) >= 50]
+            todo = [c for c in range(len(cells)) if (c not in skip if q == 0 else sat.get(c, 0) >= 50)]
             if not todo or time.time() > search_end or info["quota"]:
                 break
 
@@ -52,7 +56,7 @@ def run(keys, budget=50, public_url=lambda u: True):
                 if time.time() > search_end or info["quota"]:
                     return
                 try:
-                    places = pool.search(q, c, cells)
+                    places = pool.search(q, c, cells, known=known_ids)
                 except core.QuotaExhausted:
                     info["quota"] = True
                     return
@@ -60,7 +64,10 @@ def run(keys, budget=50, public_url=lambda u: True):
                     info["error"] = str(e)[:200]
                     return
                 info["searches"] += 1
-                sat[c] = max(sat.get(c, 0), len(places))
+                n = 60 if places.early else len(places)
+                sat[c] = max(sat.get(c, 0), n)
+                if q == 0:
+                    raw0[c] = n
                 for p in places:
                     lead = core.place_to_lead(p)
                     if lead:
@@ -69,6 +76,10 @@ def run(keys, budget=50, public_url=lambda u: True):
             with ThreadPoolExecutor(max_workers=8) as ex:
                 list(ex.map(one, todo))
         info["found"] = len(found)
+        try:
+            store.record_cells(raw0)
+        except Exception:  # noqa: BLE001
+            pass
 
         # 2) حفظ الجدد فوراً
         new = [l for s, l in found.items() if s not in known]

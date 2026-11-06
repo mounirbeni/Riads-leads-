@@ -30,7 +30,8 @@ KEYS = [k.strip() for name in ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_API_KEY_2", "
         for k in os.environ.get(name, "").split(",") if k.strip()]
 KEYS = list(dict.fromkeys(KEYS))  # بدون تكرار
 KEY = KEYS[0] if KEYS else ""
-POOL = core.KeyPool(KEYS)  # توزيع المفاتيح + التحويل عند انتهاء الحصة
+POOL = core.KeyPool(KEYS, on_usage=store.record_usage, on_exhausted=store.mark_exhausted)  # توزيع + تحويل + عدّاد
+DAILY_LIMIT = int(os.environ.get("GOOGLE_DAILY_LIMIT", "100"))  # حد Google اليومي لكل مشروع
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
 TOKEN = hmac.new(("riads|" + ACCESS_CODE + "|" + KEY).encode(), b"ok", hashlib.sha256).hexdigest()
@@ -82,7 +83,8 @@ def public_url(u):
 
 @app.get("/api/plan")
 def plan():
-    return jsonify(queries=len(core.QUERIES), cells=len(CELLS), configured=bool(KEYS), keys=len(KEYS))
+    return jsonify(queries=len(core.QUERIES), cells=len(CELLS), configured=bool(KEYS), keys=len(KEYS),
+                   skip=core.skip_cells(store.cell_state()))
 
 
 @app.post("/api/search")
@@ -96,13 +98,22 @@ def search():
     except Exception as e:  # noqa: BLE001
         return jsonify(error=str(e)), 400
     try:
-        places = POOL.search(int(d["q"]), int(d["cell"]), CELLS)
+        known = None if d.get("full") else store.known_ids()  # يوفّر الصفحات المعروفة
+        places = POOL.search(int(d["q"]), int(d["cell"]), CELLS, known=known)
         leads = [l for l in map(core.place_to_lead, places) if l]
-        return jsonify(leads=leads, raw=len(places))
+        return jsonify(leads=leads, raw=60 if places.early else len(places))
     except core.QuotaExhausted as e:
         return jsonify(error="Google API 429: " + str(e)), 429
     except Exception as e:  # noqa: BLE001
         return jsonify(error=str(e)), 502
+
+
+@app.post("/api/cells")
+def cells_stats():
+    """ذاكرة الخلايا: {خلية: عدد نتائج الكلمة الأولى} لتجنّب إعادة فحص الخلايا الفارغة."""
+    raw = (request.get_json(force=True) or {}).get("raw", {})
+    store.record_cells({int(k): int(v) for k, v in raw.items() if str(k).isdigit()})
+    return jsonify(ok=True)
 
 
 @app.post("/api/enrich")
@@ -190,9 +201,6 @@ def last_run():
     return jsonify(run=store.last_run())
 
 
-_KEYS_CACHE = {"at": 0, "data": []}
-
-
 def _check_key(key):
     try:
         r = requests.post(core.PLACES_URL, json={"textQuery": "riad", "pageSize": 1}, timeout=15,
@@ -209,15 +217,36 @@ def _check_key(key):
 
 @app.get("/api/keys")
 def keys_status():
-    """حالة كل مفتاح (متاح/منتهي). لا يكشف المفتاح، ويُخزَّن 5 دقائق لتوفير الطلبات."""
-    fresh = request.args.get("fresh") == "1"
-    if fresh or time.time() - _KEYS_CACHE["at"] > 300 or len(_KEYS_CACHE["data"]) != len(KEYS):
+    """عدّاد كل مفتاح: المستخدم اليوم من الحد، بلا فحص Google (لا يستهلك الحصة).
+    ?fresh=1: فحص فعلي بطلب واحد لكل مفتاح، ويسجّل المفاتيح المنتهية."""
+    used, dead = store.usage_today()
+    probe = {}
+    if request.args.get("fresh") == "1":
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=4) as ex:
             res = list(ex.map(_check_key, KEYS))
-        _KEYS_CACHE["data"] = [dict(r, n=i + 1) for i, (r, k) in enumerate(zip(res, KEYS))]
-        _KEYS_CACHE["at"] = time.time()
-    return jsonify(keys=_KEYS_CACHE["data"], checked_at=int(_KEYS_CACHE["at"]))
+        for i, r in enumerate(res):
+            probe[i] = r
+            if r["state"] == "exhausted" and i not in dead:
+                store.mark_exhausted(i)
+                dead.add(i)
+            if r["state"] == "ok":
+                used[i] = used.get(i, 0) + 1  # طلب الفحص نفسه
+                try:
+                    store.record_usage(i, 1)
+                except Exception:  # noqa: BLE001
+                    pass
+    out = []
+    for i in range(len(KEYS)):
+        u = used.get(i, 0)
+        exhausted = i in dead or u >= DAILY_LIMIT
+        if probe.get(i, {}).get("state") == "error":
+            state = "error"
+        else:
+            state = "exhausted" if exhausted else "ok"
+        out.append({"n": i + 1, "state": state, "used": DAILY_LIMIT if exhausted else min(u, DAILY_LIMIT),
+                    "limit": DAILY_LIMIT, "left": 0 if exhausted else max(0, DAILY_LIMIT - u)})
+    return jsonify(keys=out, limit=DAILY_LIMIT, total_left=sum(k["left"] for k in out))
 
 
 _PUB = {"at": 0.0, "rows": [], "v": ""}
@@ -400,6 +429,7 @@ body.pub .adm{display:none!important}body:not(.pub) .pubonly{display:none!import
 .dot{width:10px;height:10px;border-radius:50%;background:var(--mut);flex:none}
 .dot.ok{background:var(--ok)}.dot.exhausted{background:#d64545}.dot.error{background:#e0a030}
 .krow .st{margin-inline-start:auto;font-weight:600}
+.mt{flex-basis:100%;height:6px;background:var(--chip);border-radius:3px;overflow:hidden;margin-top:2px}.mt i{display:block;height:100%;background:var(--ok);border-radius:3px}.mt i.exhausted{background:#d64545}
 .krow small{color:var(--mut);direction:ltr}
 .qbtn{margin-top:10px;width:100%;border:0;background:var(--chip);color:var(--ink);border-radius:12px;padding:11px;font-size:14px;display:flex;align-items:center;justify-content:center;gap:6px}
 .bar{height:8px;background:var(--chip);border-radius:4px;overflow:hidden;margin:14px 0 6px;display:none}
@@ -480,7 +510,7 @@ nav button.on{color:var(--pri);font-weight:700}
         <div class="cd" id="cd">--:--:--</div>
         <div class="cdsub" id="cdsub"></div>
         <div id="klist"></div>
-        <button class="qbtn" id="kref"><svg class="i"><use href="#i-refresh"/></svg> فحص المفاتيح الآن</button>
+        <button class="qbtn" id="kref"><svg class="i"><use href="#i-refresh"/></svg> فحص دقيق (طلب واحد لكل مفتاح)</button>
       </div>
       <div class="panel">
         <h2>بحث جديد في مراكش</h2>
@@ -565,8 +595,8 @@ function tickCd(){const ms=msToReset(),s=Math.floor(ms/1000),pad=n=>String(n).pa
 setInterval(tickCd,1000);tickCd();
 const ST={ok:'متاح',exhausted:'منتهٍ اليوم',error:'تعذّر الفحص'};
 async function loadKeys(fresh){$('kref').disabled=true;$('klist').innerHTML='<div class="cdsub">جاري فحص المفاتيح...</div>';
-  try{const d=await (await fetch('/api/keys'+(fresh?'?fresh=1':''))).json();KEYST=d.keys||[];{const ok=KEYST.filter(k=>k.state==='ok').length,ex=KEYST.filter(k=>k.state==='exhausted').length;$('kcount').textContent=`عدد المفاتيح: ${KEYST.length} — متاح ${ok}، منتهٍ ${ex}`}
-    $('klist').innerHTML=KEYST.map(k=>`<div class="krow"><span class="dot ${k.state}"></span>مفتاح ${k.n} <span class="st">${ST[k.state]||k.state}</span></div>`).join('');tickCd()}
+  try{const d=await (await fetch('/api/keys'+(fresh?'?fresh=1':''))).json();KEYST=d.keys||[];{const ok=KEYST.filter(k=>k.state==='ok').length,ex=KEYST.filter(k=>k.state==='exhausted').length;$('kcount').textContent=`عدد المفاتيح: ${KEYST.length} — متاح ${ok}، منتهٍ ${ex} — المتبقي تقريباً ${d.total_left??'؟'} طلب بحث اليوم`}
+    $('klist').innerHTML=KEYST.map(k=>{const pct=Math.min(100,Math.round(100*(k.used||0)/(k.limit||100)));return `<div class="krow" style="flex-wrap:wrap"><span class="dot ${k.state}"></span>مفتاح ${k.n}<span class="st">${k.used}/${k.limit} · ${ST[k.state]||k.state}</span><div class="mt"><i class="${k.state}" style="width:${pct}%"></i></div></div>`}).join('')+'<div class="cdsub" style="margin:8px 0 0;font-size:12px">العدّ يشمل طلبات هذا الموقع منذ تفعيل العدّاد؛ المفتاح المنتهي يظهر 100/100.</div>';tickCd()}
   catch(e){$('klist').innerHTML='<div class="cdsub">تعذّر فحص المفاتيح.</div>'}$('kref').disabled=false}
 $('kref').onclick=()=>loadKeys(true);
 const fmtRun=r=>{if(!r)return 'لم يعمل بعد.';const d=new Date(r.at);const when=isNaN(d)?r.at:d.toLocaleString('ar-MA',{dateStyle:'medium',timeStyle:'short'});
@@ -607,18 +637,20 @@ $('go').onclick=async()=>{
     const plan=await (await fetch('/api/plan')).json();
     if(!plan.configured)throw new Error('API key غير مضبوط على الخادم');
     // توفير الاستهلاك: الكلمة الأولى على كل الخلايا، وباقي الكلمات فقط على الخلايا "المشبعة" (≥50 نتيجة = قد يكون فيها المزيد)
-    const found=new Map(),sat={};let done=0,failed=0,lastErr='',quota=false,sent=0;
+    const found=new Map(),sat={},raw0={};let done=0,failed=0,lastErr='',quota=false,sent=0;
     const wide=$('wide').checked,SEARCH_END=t0+LIMIT*SEARCH_SHARE;
     for(let q=0;q<plan.queries&&!stopFlag&&!quota&&Date.now()<SEARCH_END;q++){
-      const cells=[];for(let c=0;c<plan.cells;c++)if(q===0||wide||(sat[c]||0)>=50)cells.push(c);
+      const skip=new Set(wide?[]:(plan.skip||[]));
+      const cells=[];for(let c=0;c<plan.cells;c++)if(q===0?!skip.has(c):(wide||(sat[c]||0)>=50))cells.push(c);
       if(!cells.length)break;
       await pool(cells,8,async c=>{
         sent++;
-        try{const r=await post('/api/search',{q,cell:c});r.leads.forEach(l=>found.set(l.source,l));sat[c]=Math.max(sat[c]||0,r.raw||0)}
+        try{const r=await post('/api/search',{q,cell:c,full:wide});r.leads.forEach(l=>found.set(l.source,l));sat[c]=Math.max(sat[c]||0,r.raw||0);if(q===0)raw0[c]=r.raw||0}
         catch(e){failed++;lastErr=e.message;if(/Google API 429|Quota/i.test(lastErr))quota=true}
         done++;$('msg').textContent=`بحث Google Maps: كلمة ${q+1}/${plan.queries} - ${done} طلب - وُجد ${found.size} رياض`;
       },SEARCH_END,()=>!quota);
     }
+    if(Object.keys(raw0).length)post('/api/cells',{raw:raw0}).catch(()=>{});
     if(done&&failed===done&&!quota)throw new Error(lastErr);
     const leads=[...found.values()].filter(l=>!KNOWN.has(l.source)),doCrawl=$('crawl').checked,seen=new Set();let n=0;
     const already=found.size-leads.length;

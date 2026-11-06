@@ -5,6 +5,7 @@
 import json
 import os
 import re
+import threading
 import time
 import unicodedata
 import uuid
@@ -256,3 +257,140 @@ def last_run():
             return json.load(f)
     except Exception:  # noqa: BLE001
         return None
+
+
+# ----------------------------------------------------------------- معرّفات معروفة (توقّف مبكر عن تصفّح الصفحات)
+_KNOWN = {"at": 0.0, "ids": set()}
+
+
+def known_ids(ttl=60):
+    """معرّفات Google Place للرياضات المحفوظة (كاش دقيقة)."""
+    if time.time() - _KNOWN["at"] > ttl:
+        ids = set()
+        for r in load():
+            for s in sources_of(r):
+                if s.startswith("google:"):
+                    ids.add(s[7:])
+        _KNOWN.update(at=time.time(), ids=ids)
+    return _KNOWN["ids"]
+
+
+# ----------------------------------------------------------------- ذاكرة الخلايا
+CELLS_PREFIX = "cells/"
+LOCAL_CELLS = os.path.join(os.path.dirname(__file__), "data", "cells.json")
+
+
+def record_cells(raw):
+    """raw: {cell_index: عدد نتائج الكلمة الأولى}. يُحفظ ملف جديد لكل تشغيل (لا كتابة فوق شيء)."""
+    if not raw:
+        return
+    info = {"at": time.time(), "raw": {str(k): int(v) for k, v in raw.items()}}
+    if USE_BLOB:
+        from vercel.blob import sync as blob
+        name = f"{CELLS_PREFIX}{int(time.time() * 1000):013d}-{uuid.uuid4().hex[:6]}.json"
+        blob.put_blob(name, json.dumps(info).encode(), access="private", content_type="application/json",
+                      add_random_suffix=False, allow_overwrite=False)
+    else:
+        os.makedirs(os.path.dirname(LOCAL_CELLS), exist_ok=True)
+        old = cell_state()
+        for k, v in info["raw"].items():
+            old[k] = {"raw": v, "at": info["at"]}
+        with open(LOCAL_CELLS, "w") as f:
+            json.dump(old, f)
+
+
+def cell_state(last_n=12):
+    """{cell: {"raw", "at"}} بدمج آخر الملفات (الأحدث يغلب)."""
+    state = {}
+    try:
+        if USE_BLOB:
+            from concurrent.futures import ThreadPoolExecutor
+            names = _list(CELLS_PREFIX)[-last_n:]
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                infos = list(ex.map(_blob_json, names))
+            for info in infos:  # من الأقدم للأحدث
+                for k, v in info.get("raw", {}).items():
+                    state[k] = {"raw": v, "at": info.get("at", 0)}
+        elif os.path.exists(LOCAL_CELLS):
+            with open(LOCAL_CELLS) as f:
+                state = json.load(f)
+    except Exception:  # noqa: BLE001
+        pass
+    return state
+
+
+# ----------------------------------------------------------------- عدّاد استعمال المفاتيح (يوم باسيفيك)
+USAGE_PREFIX = "usage/"
+LOCAL_USAGE = os.path.join(os.path.dirname(__file__), "data", "usage.json")
+_LOCK = threading.Lock()
+
+
+def pacific_day():
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+
+
+def record_usage(key_index, n):
+    """يسجّل n طلباً لمفتاح. في Blob: الاسم نفسه يحمل البيانات (usage/اليوم/مفتاح-عدد-وقت) فيُقرأ بالقائمة دون تنزيل."""
+    day = pacific_day()
+    if USE_BLOB:
+        from vercel.blob import sync as blob
+        name = f"{USAGE_PREFIX}{day}/{key_index}-{n}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:4]}"
+        blob.put_blob(name, b"1", access="private", content_type="text/plain",
+                      add_random_suffix=False, allow_overwrite=False)
+    else:
+        os.makedirs(os.path.dirname(LOCAL_USAGE), exist_ok=True)
+        with _LOCK:
+            try:
+                with open(LOCAL_USAGE) as f:
+                    u = json.load(f)
+            except Exception:  # noqa: BLE001
+                u = {}
+            u.setdefault(day, {})[str(key_index)] = u.get(day, {}).get(str(key_index), 0) + n
+            with open(LOCAL_USAGE, "w") as f:
+                json.dump(u, f)
+
+
+def mark_exhausted(key_index):
+    """علامة «انتهت حصة هذا المفتاح اليوم» (تبقى حتى تجدد الحصة)."""
+    day = pacific_day()
+    if USE_BLOB:
+        from vercel.blob import sync as blob
+        name = f"{USAGE_PREFIX}{day}/E{key_index}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:4]}"
+        blob.put_blob(name, b"1", access="private", content_type="text/plain",
+                      add_random_suffix=False, allow_overwrite=False)
+    else:
+        os.makedirs(os.path.dirname(LOCAL_USAGE), exist_ok=True)
+        with _LOCK:
+            try:
+                with open(LOCAL_USAGE) as f:
+                    u = json.load(f)
+            except Exception:  # noqa: BLE001
+                u = {}
+            u.setdefault(day, {})["E" + str(key_index)] = 1
+            with open(LOCAL_USAGE, "w") as f:
+                json.dump(u, f)
+
+
+def usage_today():
+    """(used, exhausted): used = {رقم المفتاح: عدد الطلبات اليوم}، exhausted = {أرقام المفاتيح المنتهية}."""
+    day = pacific_day()
+    used, dead = {}, set()
+    try:
+        if USE_BLOB:
+            for name in _list(f"{USAGE_PREFIX}{day}/"):
+                part = name.rsplit("/", 1)[-1].split("-")
+                if part[0].startswith("E"):
+                    dead.add(int(part[0][1:]))
+                else:
+                    used[int(part[0])] = used.get(int(part[0]), 0) + int(part[1])
+        elif os.path.exists(LOCAL_USAGE):
+            with open(LOCAL_USAGE) as f:
+                for k, v in json.load(f).get(day, {}).items():
+                    if k.startswith("E"):
+                        dead.add(int(k[1:]))
+                    else:
+                        used[int(k)] = v
+    except Exception:  # noqa: BLE001
+        pass
+    return used, dead
